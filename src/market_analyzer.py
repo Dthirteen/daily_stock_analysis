@@ -94,16 +94,34 @@ class MarketOverview:
     limit_down_count: int = 0           # 跌停家数
     total_amount: float = 0.0           # 两市成交额（亿元）
     # north_flow: float = 0.0           # 北向资金净流入（亿元）- 已废弃，接口不可用
-    
+
     # 板块涨幅榜
     top_sectors: List[Dict] = field(default_factory=list)     # 涨幅前5板块
     bottom_sectors: List[Dict] = field(default_factory=list)  # 跌幅前5板块
-    
+
     # 增强板块数据
     top_sectors_enhanced: List[SectorWithCapital] = field(default_factory=list)  # 增强的领涨板块
     bottom_sectors_enhanced: List[SectorWithCapital] = field(default_factory=list)  # 增强的领跌板块
     sector_capital_weights: Dict[str, float] = field(default_factory=dict)  # 板块资金权重
     recommended_stocks: List[StockRecommendation] = field(default_factory=list)  # 推荐个股
+
+    # ── 增强数据：资金流向 ──────────────────────────────
+    capital_flow: Dict[str, Any] = field(default_factory=dict)          # {north_net_inflow, southbound_net_inflow, main_net_inflow, main_inflow_desc}
+    sector_capital_flow_top: List[Dict] = field(default_factory=list)   # 净流入前N板块 [{name, net_inflow}]
+    sector_capital_flow_bottom: List[Dict] = field(default_factory=list) # 净流出前N板块
+
+    # ── 增强数据：市场宽度 ──────────────────────────────
+    gain_distribution: Dict[str, int] = field(default_factory=dict)     # 涨幅区间分布 {">5%": count, ...}
+    limit_up_detail: Dict[str, Any] = field(default_factory=dict)       # 涨停池明细 {total, first_limit, non_first_limit, broken_limit, broken_rate}
+    yest_limit_avg_chg: float = 0.0                                    # 昨日涨停股今日平均涨跌幅(%)
+
+    # ── 增强数据：指数技术面 ────────────────────────────
+    index_technicals: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # {index_code: {ma_status, macd_status, rsi_status, volume_status, score}}
+
+    # ── 增强数据：板块持续性 ────────────────────────────
+    persistent_leaders: List[str] = field(default_factory=list)   # 连续领涨板块名称列表
+    new_leaders: List[str] = field(default_factory=list)         # 新晋领涨板块名称列表
+    falling_leaders: List[str] = field(default_factory=list)     # 由涨转跌板块名称列表
 
 
 class MarketAnalyzer:
@@ -314,8 +332,27 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         
         # 4. 增强板块分析（资金量权重、推荐个股）
         self._enhance_sector_analysis(overview)
+
+        # 5. 获取北向/南向/主力资金流向（增强1）
+        if self.profile.has_market_stats:
+            self._get_capital_flow_data(overview)
+
+        # 6. 获取市场宽度数据：涨幅分布 + 涨停池明细 + 昨日涨停表现（增强3）
+        if self.profile.has_market_stats:
+            self._get_market_breadth_data(overview)
+
+        # 7. 指数技术面分析：MA/MACD/RSI/量价（增强2）
+        self._get_index_technicals(overview)
+
+        # 8. 板块持续性分析：对比昨日领涨板块（增强5）
+        if self.profile.has_market_stats:
+            self._analyze_sector_persistence(overview)
+
+        # 9. 智能选股：综合多维度筛选7支建议关注的股票
+        if self.profile.has_market_stats:
+            self._get_smart_stock_picks(overview)
         
-        # 5. 获取北向资金（可选）
+        # 9. 获取北向资金（可选）
         # self._get_north_flow(overview)
         
         return overview
@@ -422,7 +459,446 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             
         except Exception as e:
             logger.error(f"[大盘] 增强板块分析失败: {e}")
-    
+
+    def _get_capital_flow_data(self, overview: MarketOverview):
+        """获取资金流向数据（北向/南向/主力 + 行业资金流向排名）"""
+        try:
+            logger.info("[大盘] 获取资金流向数据...")
+
+            # 1. 综合资金流向（北向/南向/主力）
+            flow_data = self.data_manager.get_capital_flow()
+            if flow_data:
+                overview.capital_flow = flow_data
+                logger.info(
+                    f"[大盘] 资金流向: 北向={flow_data.get('north_net_inflow', 'N/A')}亿, "
+                    f"主力={flow_data.get('main_net_inflow', 'N/A')}亿({flow_data.get('main_inflow_desc', '')})"
+                )
+
+            # 2. 行业板块资金流向排名
+            sector_top, sector_bottom = self.data_manager.get_sector_capital_flow(5)
+            if sector_top or sector_bottom:
+                overview.sector_capital_flow_top = sector_top
+                overview.sector_capital_flow_bottom = sector_bottom
+                logger.info(f"[大盘] 板块资金流向: 流入TOP {[s['name'] for s in sector_top[:3]]}")
+
+        except Exception as e:
+            logger.error(f"[大盘] 获取资金流向失败: {e}")
+
+    def _get_market_breadth_data(self, overview: MarketOverview):
+        """获取市场宽度数据（涨幅分布 + 涨停池明细 + 昨日涨停表现）"""
+        try:
+            logger.info("[大盘] 获取市场宽度数据...")
+
+            breadth = self.data_manager.get_market_breadth()
+            if not breadth:
+                return
+
+            if 'gain_distribution' in breadth:
+                overview.gain_distribution = breadth['gain_distribution']
+                dist = breadth['gain_distribution']
+                logger.info(f"[大盘] 涨幅分布: {dist}")
+
+            if 'limit_up_detail' in breadth:
+                overview.limit_up_detail = breadth['limit_up_detail']
+                detail = breadth['limit_up_detail']
+                logger.info(
+                    f"[大盘] 涨停池: 总计{detail.get('total', 0)}家, "
+                    f"一字板{detail.get('first_limit', 0)}, 炸板{detail.get('broken_limit', 0)}({detail.get('broken_rate', 0)}%)"
+                )
+
+            if 'yest_limit_avg_chg' in breadth:
+                overview.yest_limit_avg_chg = breadth['yest_limit_avg_chg']
+                logger.info(f"[大盘] 昨日涨停今日均涨幅: {breadth['yest_limit_avg_chg']}%")
+
+        except Exception as e:
+            logger.error(f"[大盘] 获取市场宽度失败: {e}")
+
+    def _get_index_technicals(self, overview: MarketOverview):
+        """获取主要指数的技术面分析（MA排列/MACD/RSI/量价）"""
+        if not self.profile.has_market_stats:
+            # 美股/港股暂不计算指数技术面（可后续扩展）
+            return
+
+        try:
+            logger.info("[大盘] 计算指数技术面指标...")
+
+            # 分析前几个主要指数
+            index_codes_to_analyze = []
+            for idx in overview.indices[:4]:
+                code = idx.code
+                if code and (code.startswith('sh') or code.startswith('sz')):
+                    index_codes_to_analyze.append(code)
+
+            technicals = {}
+            for code in index_codes_to_analyze:
+                df = self.data_manager.get_index_daily_history(code, days=60)
+                if df is None or len(df) < 20:
+                    continue
+
+                tech = self._analyze_single_index_technical(df, code)
+                if tech:
+                    technicals[code] = tech
+
+            if technicals:
+                overview.index_technicals = technicals
+                logger.info(f"[大盘] 指数技术面分析完成: {list(technicals.keys())}")
+
+        except Exception as e:
+            logger.error(f"[大盘] 指数技术面分析失败: {e}")
+
+    def _analyze_single_index_technical(self, df: pd.DataFrame, index_code: str) -> Optional[Dict[str, Any]]:
+        """对单只指数进行轻量级技术分析"""
+        import numpy as np
+
+        result = {}
+        try:
+            close = pd.to_numeric(df['close'], errors='coerce')
+            volume = pd.to_numeric(df['volume'], errors='coerce')
+            high = pd.to_numeric(df['high'], errors='coerce')
+            low = pd.to_numeric(df['low'], errors='coerce')
+
+            if len(close) < 10:
+                return None
+
+            latest = close.iloc[-1]
+            prev_close = close.iloc[-2]
+
+            # ── MA 排列状态 ──
+            ma5 = close.rolling(5).mean().iloc[-1]
+            ma10 = close.rolling(10).mean().iloc[-1]
+            ma20 = close.rolling(20).mean().iloc[-1]
+            ma60 = close.rolling(min(60, len(close))).mean().iloc[-1]
+
+            result['ma5'] = round(float(ma5), 2)
+            result['ma10'] = round(float(ma10), 2)
+            result['ma20'] = round(float(ma20), 2)
+
+            if pd.notna(ma60):
+                result['ma60'] = round(float(ma60), 2)
+
+            # 判断均线排列
+            if all(pd.notna(x) for x in [ma5, ma10, ma20]):
+                if ma5 > ma10 > ma20:
+                    result['ma_status'] = "多头排列"
+                    ma_score = 100
+                elif ma5 < ma10 < ma20:
+                    result['ma_status'] = "空头排列"
+                    ma_score = 0
+                else:
+                    result['ma_status'] = "纠缠震荡"
+                    ma_score = 50
+            else:
+                result['ma_status'] = "数据不足"
+                ma_score = 50
+
+            # ── MACD 状态 ──
+            ema12 = close.ewm(span=12).mean()
+            ema26 = close.ewm(span=26).mean()
+            dif = ema12 - ema26
+            dea = dif.ewm(span=9).mean()
+            macd_bar = (dif - dea) * 2
+
+            current_dif = float(dif.iloc[-1]) if pd.notna(dif.iloc[-1]) else 0
+            prev_dif = float(dif.iloc[-2]) if len(dif) >= 2 and pd.notna(dif.iloc[-2]) else 0
+            current_macd = float(macd_bar.iloc[-1]) if pd.notna(macd_bar.iloc[-1]) else 0
+
+            result['macd_dif'] = round(current_dif, 4)
+            result['macd_hist'] = round(current_macd, 4)
+
+            if current_dif > 0 and prev_dif <= 0:
+                result['macd_status'] = "金叉"
+                macd_score = 90
+            elif current_dif < 0 and prev_dif >= 0:
+                result['macd_status'] = "死叉"
+                macd_score = 10
+            elif current_dif > 0:
+                result['macd_status'] = "多头区域"
+                macd_score = 70
+            elif current_dif < 0:
+                result['macd_status'] = "空头区域"
+                macd_score = 30
+            else:
+                result['macd_status'] = "零轴附近"
+                macd_score = 50
+
+            # ── RSI 状态 ──
+            delta = close.diff()
+            gain = delta.clip(lower=0).rolling(14).mean()
+            loss = (-delta.clip(upper=0)).rolling(14).mean()
+            rs = gain / loss.replace(0, np.nan)
+            rsi = 100 - (100 / (1 + rs))
+
+            current_rsi = float(rsi.iloc[-1]) if pd.notna(rsi.iloc[-1]) else 50
+            result['rsi'] = round(current_rsi, 1)
+
+            if current_rsi > 70:
+                result['rsi_status'] = "超买区"
+                rsi_score = 30  # 超买意味着回调风险
+            elif current_rsi < 30:
+                result['rsi_status'] = "超卖区"
+                rsi_score = 80  # 超卖可能反弹
+            elif current_rsi > 55:
+                result['rsi_status'] = "偏强"
+                rsi_score = 70
+            elif current_rsi < 45:
+                result['rsi_status'] = "偏弱"
+                rsi_score = 35
+            else:
+                result['rsi_status'] = "中性"
+                rsi_score = 50
+
+            # ── 量能状态 ──
+            vol_ma5 = volume.rolling(5).mean().iloc[-1]
+            vol_today = float(volume.iloc[-1]) if pd.notna(volume.iloc[-1]) else 0
+            vol_ratio = vol_today / vol_ma5 if vol_ma5 and vol_ma5 > 0 else 1.0
+
+            result['vol_today'] = int(vol_today)
+            result['vol_ma5'] = int(vol_ma5)
+            result['vol_ratio'] = round(vol_ratio, 2)
+
+            if vol_ratio > 1.3:
+                result['volume_status'] = "明显放量"
+                vol_score = 85
+            elif vol_ratio > 1.05:
+                result['volume_status'] = "温和放量"
+                vol_score = 70
+            elif vol_ratio < 0.75:
+                result['volume_status'] = "明显缩量"
+                vol_score = 30
+            elif vol_ratio < 0.95:
+                result['volume_status'] = "温和缩量"
+                vol_score = 45
+            else:
+                result['volume_status'] = "量能持平"
+                vol_score = 55
+
+            # ── 综合评分（加权）──
+            total_score = int(round(ma_score * 0.30 + macd_score * 0.25 + rsi_score * 0.20 + vol_score * 0.25))
+            result['score'] = max(0, min(100, total_score))
+
+            return result
+
+        except Exception as e:
+            logger.warning(f"[大盘] 指数 {index_code} 技术面计算异常: {e}")
+            return None
+
+    def _analyze_sector_persistence(self, overview: MarketOverview):
+        """
+        分析板块持续性：对比今日与昨日领涨板块，识别连续领涨/新晋/由涨转跌板块
+        通过保存和读取昨日板块数据实现跨日对比
+        """
+        import json
+        import os
+
+        try:
+            today_top_names = set(s.get('name', '') for s in overview.top_sectors)
+            if not today_top_names:
+                return
+
+            cache_dir = os.path.join(os.path.dirname(__file__), '..', '.cache')
+            cache_file = os.path.join(cache_dir, 'market_yesterday_sectors.json')
+
+            yesterday_top_names = set()
+
+            # 尝试读取昨日缓存
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file, 'r', encoding='utf-8') as f:
+                        cached = json.load(f)
+                        yesterday_top_names = set(cached.get('top_sectors', []))
+                except Exception as e:
+                    logger.debug(f"[大盘] 读取昨日板块缓存失败: {e}")
+
+            # 计算交集和差集
+            persistent = sorted(today_top_names & yesterday_top_names)
+            new_leaders = sorted(today_top_names - yesterday_top_names)
+            falling_leaders = sorted(yesterday_top_names - today_top_names)
+
+            overview.persistent_leaders = persistent
+            overview.new_leaders = new_leaders
+            overview.falling_leaders = falling_leaders
+
+            logger.info(
+                f"[大盘] 板块持续性: 连续领涨={persistent}, 新晋={new_leaders}, 由涨转跌={falling_leaders}"
+            )
+
+            # 缓存今日数据供明日使用
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+                with open(cache_file, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        'date': overview.date,
+                        'top_sectors': list(today_top_names),
+                        'bottom_sectors': [s.get('name', '') for s in overview.bottom_sectors],
+                    }, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                logger.debug(f"[大盘] 写入板块缓存失败: {e}")
+
+        except Exception as e:
+            logger.error(f"[大盘] 板块持续性分析失败: {e}")
+
+    def _get_smart_stock_picks(self, overview: MarketOverview):
+        """
+        智能选股：综合多维度筛选 7 支建议关注的股票
+
+        选股策略（优先级从高到低）：
+        1. 涨停池强势股（非一字板，有换手，说明资金认可）
+        2. 连续领涨板块的龙头股（板块持续性强 → 龙头确定性高）
+        3. 新晋领涨板块的放量龙头（新热点启动信号）
+        4. 资金大幅流入板块的领头股
+
+        综合评分 = 涨跌幅权重(25) + 板块热度(25) + 换手率(20) + 成交额(15) + 资金面(15)
+        """
+        import pandas as pd
+
+        if not self.profile.has_market_stats:
+            return
+
+        try:
+            logger.info("[大盘] 开始智能选股，目标 7 支...")
+            all_picks: Dict[str, StockRecommendation] = {}  # code -> recommendation (去重)
+
+            # ── 策略1：涨停池强势股（非一字板优先，说明可参与）──
+            limit_up_stocks = self.data_manager.get_limit_up_pool_stocks()
+            if limit_up_stocks:
+                # 过滤掉一字板（无法买入），按涨跌幅排序取前3
+                tradable = [s for s in limit_up_stocks if not s.get('reason', '').startswith('一字')]
+                if not tradable:
+                    tradable = limit_up_stocks  # 全是一字板时也纳入
+
+                for s in sorted(tradable, key=lambda x: x.get('change_pct', 0), reverse=True)[:3]:
+                    rec = StockRecommendation(
+                        code=s['code'],
+                        name=s['name'],
+                        change_pct=s.get('change_pct', 0.0),
+                        reason=f"涨停{'('+s['reason']+')' if s.get('reason') else ''}",
+                        confidence=min(95, 75 + s.get('change_pct', 0) * 0.5),
+                        pick_source='limit_up',
+                    )
+                    all_picks[s['code']] = rec
+                logger.info(f"[选股] 策略1(涨停池): 已选 {min(3, len(tradable))} 支")
+
+            # ── 策略2：连续领涨板块龙头 ──
+            if overview.persistent_leaders:
+                for sector_name in overview.persistent_leaders[:2]:
+                    df = self.data_manager.get_sector_constituents(sector_name)
+                    if df is not None and not df.empty:
+                        # 取涨幅最大的作为龙头
+                        chg_col = 'change_pct' if 'change_pct' in df.columns else '涨跌幅'
+                        if chg_col in df.columns:
+                            df[chg_col] = pd.to_numeric(df[chg_col], errors='coerce')
+                            leader = df.nlargest(1, chg_col).iloc[0]
+                            code = str(leader.get('code', leader.get('代码', '')))
+                            if code and code not in all_picks:
+                                name = str(leader.get('name', leader.get('名称', '')))
+                                chg = float(leader[chg_col]) if pd.notna(leader[chg_col]) else 0.0
+                                turnover = float(leader.get('turnover_rate', leader.get('换手率', 0)))
+                                amount = float(leader.get('amount', leader.get('成交额', 0)))
+                                rec = StockRecommendation(
+                                    code=code,
+                                    name=name,
+                                    change_pct=chg,
+                                    sector=sector_name,
+                                    reason=f"{sector_name}连续领涨龙头",
+                                    confidence=min(90, 70 + abs(chg) * 0.5),
+                                    pick_source='sector_leader',
+                                    turnover_rate=turnover,
+                                    amount=amount / 1e8 if amount > 1e6 else amount,
+                                )
+                                all_picks[code] = rec
+                logger.info(f"[选股] 策略2(连续领涨龙头): 已选若干支")
+
+            # ── 策略3：今日新晋热门板块龙头 ──
+            if overview.new_leaders:
+                for sector_name in overview.new_leaders[:2]:
+                    df = self.data_manager.get_sector_constituents(sector_name)
+                    if df is not None and not df.empty:
+                        chg_col = 'change_pct' if 'change_pct' in df.columns else '涨跌幅'
+                        if chg_col in df.columns:
+                            df[chg_col] = pd.to_numeric(df[chg_col], errors='coerce')
+                            # 优先选涨幅大且换手高的（说明资金大量介入）
+                            turnover_col = 'turnover_rate' if 'turnover_rate' in df.columns else ('换手率' if '换手率' in df.columns else None)
+                            if turnover_col:
+                                df[turnover_col] = pd.to_numeric(df[turnover_col], errors='coerce')
+                                leader = df.iloc[(df[chg_col] * 0.6 + df.get(turnover_col, 0).fillna(0) * 10).nlargest(1).index[0]]
+                            else:
+                                leader = df.nlargest(1, chg_col).iloc[0]
+
+                            code = str(leader.get('code', leader.get('代码', '')))
+                            if code and code not in all_picks:
+                                name = str(leader.get('name', leader.get('名称', '')))
+                                chg = float(leader[chg_col]) if pd.notna(leader[chg_col]) else 0.0
+                                turnover = float(leader.get(turnover_col or 'turnover_rate', 0))
+                                amount = float(leader.get('amount', leader.get('成交额', 0)))
+                                rec = StockRecommendation(
+                                    code=code,
+                                    name=name,
+                                    change_pct=chg,
+                                    sector=sector_name,
+                                    reason=f"{sector_name}新晋热点，放量启动",
+                                    confidence=min(85, 65 + abs(chg) * 0.5 + min(turnover * 0.5, 10)),
+                                    pick_source='hot_sector',
+                                    turnover_rate=turnover,
+                                    amount=amount / 1e8 if amount > 1e6 else amount,
+                                )
+                                all_picks[code] = rec
+                logger.info(f"[选股] 策略3(新晋热点龙头): 已选若干支")
+
+            # ── 策略4：资金流入板块领头股补充 ──
+            if overview.sector_capital_flow_top and len(all_picks) < 7:
+                for s in overview.sector_capital_flow_top[:2]:
+                    sector_name = s.get('name', '')
+                    if not sector_name:
+                        continue
+                    df = self.data_manager.get_sector_constituents(sector_name)
+                    if df is not None and not df.empty:
+                        chg_col = 'change_pct' if 'change_pct' in df.columns else '涨跌幅'
+                        if chg_col in df.columns:
+                            df[chg_col] = pd.to_numeric(df[chg_col], errors='coerce')
+                            leader = df.nlargest(1, chg_col).iloc[0]
+                            code = str(leader.get('code', leader.get('代码', '')))
+                            if code and code not in all_picks:
+                                name = str(leader.get('name', leader.get('名称', '')))
+                                chg = float(leader[chg_col]) if pd.notna(leader[chg_col]) else 0.0
+                                inflow = s.get('net_inflow', 0)
+                                rec = StockRecommendation(
+                                    code=code,
+                                    name=name,
+                                    change_pct=chg,
+                                    sector=sector_name,
+                                    reason=f"{sector_name}资金净流入{inflow:+.1f}亿龙头",
+                                    confidence=min(80, 60 + min(inflow, 20)),
+                                    pick_source='capital_inflow',
+                                )
+                                all_picks[code] = rec
+                                if len(all_picks) >= 7:
+                                    break
+                logger.info(f"[选股] 策略4(资金流入龙头): 补充完毕")
+
+            # ── 排序 & 截断到 7 支 ──
+            final_picks = sorted(
+                all_picks.values(),
+                key=lambda x: x.confidence,
+                reverse=True
+            )[:7]
+
+            # 重新计算排名后的信心度（让分值更有区分度）
+            for i, pick in enumerate(final_picks):
+                pick.confidence = max(40, min(98, 95 - i * 8))
+
+            overview.recommended_stocks = final_picks
+            logger.info(f"[大盘] 智能选股完成：共 {len(final_picks)} 支")
+            for p in final_picks:
+                logger.info(f"  [{p.pick_source}] {p.code} {p.name}: {p.reason} | 信心度:{p.confidence:.0f}")
+
+        except Exception as e:
+            logger.error(f"[大盘] 智能选股失败: {e}")
+            # fallback 到原有逻辑
+            if not overview.recommended_stocks and overview.top_sectors_enhanced:
+                overview.recommended_stocks = self.sector_analyzer.get_recommended_stocks(
+                    overview.top_sectors_enhanced, max_stocks=7
+                )
+
     # def _get_north_flow(self, overview: MarketOverview):
     #     """获取北向资金流入"""
     #     try:
@@ -528,6 +1004,12 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         sector_capital_block = self._build_sector_capital_block(overview)
         stock_recommendation_block = self._build_stock_recommendation_block(overview)
         news_block = self._build_news_block(news or [])
+        # ── 增强数据块 ──
+        capital_flow_block = self._build_capital_flow_block(overview)
+        market_breadth_block = self._build_market_breadth_block(overview)
+        index_technicals_block = self._build_index_technicals_block(overview)
+        sector_persistence_block = self._build_sector_persistence_block(overview)
+
         patterns = (
             _ENGLISH_SECTION_PATTERNS
             if self._get_review_language() == "en"
@@ -536,37 +1018,70 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
         if stats_block:
             review = self._insert_after_section(
-                review,
-                patterns["market_summary"],
-                stats_block,
+                review, patterns["market_summary"], stats_block,
             )
 
         if indices_block:
             review = self._insert_after_section(
-                review,
-                patterns["index_commentary"],
-                indices_block,
+                review, patterns["index_commentary"], indices_block,
             )
 
         if sector_capital_block:
             review = self._insert_after_section(
-                review,
-                patterns["sector_highlights"],
-                sector_capital_block,
+                review, patterns["sector_highlights"], sector_capital_block,
             )
 
         if stock_recommendation_block and "stock_recommendations" in patterns:
             review = self._insert_after_section(
+                review, patterns["stock_recommendations"], stock_recommendation_block,
+            )
+
+        # ── 注入增强版选股表格（覆盖/追加到个股段落）──
+        smart_picks_block = self._build_stock_recommendation_block(overview)
+        if smart_picks_block:
+            # 尝试注入到 Stock Recommendations / 值得关注个股 段落
+            review = self._insert_after_section(
                 review,
-                patterns["stock_recommendations"],
-                stock_recommendation_block,
+                patterns.get("stock_recommendations", r"###\s*(?:5\.\s*)?(?:Stock Recommendations|值得关注的个股)"),
+                smart_picks_block,
             )
 
         if news_block and "news_catalysts" in patterns:
             review = self._insert_after_section(
+                review, patterns["news_catalysts"], news_block,
+            )
+
+        # ── 注入增强数据块 ──
+        # 资金流向注入到 Fund Flows / 资金与情绪 段落
+        if capital_flow_block:
+            review = self._insert_after_section(
                 review,
-                patterns["news_catalysts"],
-                news_block,
+                _ENGLISH_SECTION_PATTERNS.get("fund_flows", r"###\s*(?:3\.\s*)?(?:Fund Flows|Capital)")
+                if self._get_review_language() == "en"
+                else _CHINESE_SECTION_PATTERNS.get("funds_sentiment", r"###\s*五、(?:资金与情绪|资金动向)"),
+                capital_flow_block,
+            )
+
+        # 市场宽度注入到资金与情绪段落后（或作为独立段落）
+        if market_breadth_block:
+            review = self._insert_after_section(
+                review,
+                _ENGLISH_SECTION_PATTERNS.get("fund_flows", r"###\s*(?:3\.\s*)?(?:Fund Flows|Capital)")
+                if self._get_review_language() == "en"
+                else _CHINESE_SECTION_PATTERNS.get("funds_sentiment", r"###\s*五、(?:资金与情绪|资金动向)"),
+                market_breadth_block,
+            )
+
+        # 指数技术面注入到指数结构段落后
+        if index_technicals_block:
+            review = self._insert_after_section(
+                review, patterns["index_commentary"], index_technicals_block,
+            )
+
+        # 板块持续性注入到板块主线段落后
+        if sector_persistence_block:
+            review = self._insert_after_section(
+                review, patterns["sector_highlights"], sector_persistence_block,
             )
 
         return review
@@ -697,13 +1212,52 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         )
 
     def _build_stock_recommendation_block(self, overview: MarketOverview) -> str:
-        """Build stock recommendation block."""
+        """Build stock recommendation block (enhanced: 7 stocks with source tags)."""
         if not overview.recommended_stocks:
             return ""
-        return build_stock_recommendation_block(
-            overview.recommended_stocks,
-            language=self._get_review_language()
-        )
+
+        lang = self._get_review_language()
+        lines = []
+
+        # 来源标签映射
+        source_tags = {
+            'limit_up': '🔥涨停',
+            'sector_leader': '🏆领涨',
+            'hot_sector': '🆕热点',
+            'capital_inflow': '💰资金',
+            '': '⭐推荐',
+        }
+
+        if lang == "en":
+            lines.extend([
+                "#### 🎯 Suggested Stock Picks (Top 7)",
+                "| # | Code | Name | Chg% | Sector | Source | Rationale | Confidence |",
+                "|---|------|------|-----|--------|--------|-----------|------------|",
+            ])
+            for rank, stock in enumerate(overview.recommended_stocks[:7], 1):
+                src = source_tags.get(stock.pick_source, '⭐')
+                reason_short = stock.reason[:20] if len(stock.reason) > 20 else stock.reason
+                lines.append(
+                    f"| {rank} | {stock.code} | {stock.name} | "
+                    f"{stock.change_pct:+.1f}% | {stock.sector or '-'} | {src} | "
+                    f"{reason_short} | {stock.confidence:.0f}% |"
+                )
+        else:
+            lines.extend([
+                "#### 🎯 建议关注个股 TOP 7",
+                "| 序号 | 代码 | 名称 | 涨跌幅 | 所属板块 | 来源 | 推荐理由 | 信心度 |",
+                "|------|------|------|--------|---------|------|---------|--------|",
+            ])
+            for rank, stock in enumerate(overview.recommended_stocks[:7], 1):
+                src = source_tags.get(stock.pick_source, '⭐')
+                reason_short = stock.reason[:20] if len(stock.reason) > 20 else stock.reason
+                lines.append(
+                    f"| {rank} | {stock.code} | {stock.name} | "
+                    f"{stock.change_pct:+.1f}% | {stock.sector or '-'} | {src} | "
+                    f"{reason_short} | {stock.confidence:.0f}% |"
+                )
+
+        return "\n".join(lines)
 
     def _build_news_block(self, news: List) -> str:
         """Build a compact news catalyst table for the rendered report."""
@@ -732,6 +1286,397 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             title = self._escape_table_cell(str(title).strip()[:42])
             signal = self._escape_table_cell(str(snippet).strip().replace("\n", " ")[:58] or "-")
             lines.append(f"| {idx} | {title} | {signal} |")
+        return "\n".join(lines)
+
+    # ── 增强数据表格构建方法 ──────────────────────────────
+
+    def _build_capital_flow_block(self, overview: MarketOverview) -> str:
+        """构建资金流向表格（北向/南向/主力 + 行业资金流向排名）"""
+        if not overview.capital_flow and not overview.sector_capital_flow_top:
+            return ""
+
+        lang = self._get_review_language()
+        lines = []
+
+        if lang == "en":
+            lines.append("#### Capital Flows")
+        else:
+            lines.append("#### 资金流向")
+
+        # 综合资金流向
+        cf = overview.capital_flow
+        if cf:
+            if lang == "en":
+                lines.append("| Flow Type | Net Inflow (100M) | Signal |")
+                lines.append("|----------|-------------------|--------|")
+                north = cf.get('north_net_inflow')
+                south = cf.get('southbound_net_inflow')
+                main_val = cf.get('main_net_inflow')
+                main_desc = cf.get('main_inflow_desc', '')
+                if north is not None:
+                    arrow = "🟢" if north > 0 else "🔴" if north < 0 else "⚪"
+                    lines.append(f"| Northbound | {arrow} {north:+.2f} | {'Inflow' if north > 0 else 'Outflow' if north < 0 else 'Flat'} |")
+                if south is not None:
+                    arrow = "🟢" if south > 0 else "🔴" if south < 0 else "⚪"
+                    lines.append(f"| Southbound | {arrow} {south:+.2f} | {'Inflow' if south > 0 else 'Outflow' if south < 0 else 'Flat'} |")
+                if main_val is not None:
+                    arrow = "🟢" if main_val > 0 else "🔴" if main_val < 0 else "⚪"
+                    lines.append(f"| Institutional | {arrow} {main_val:+.2f} | {main_desc} |")
+            else:
+                lines.append("| 资金类型 | 净流入(亿) | 信号 |")
+                lines.append("|----------|-----------|------|")
+                north = cf.get('north_net_inflow')
+                south = cf.get('southbound_net_inflow')
+                main_val = cf.get('main_net_inflow')
+                main_desc = cf.get('main_inflow_desc', '')
+                if north is not None:
+                    arrow = "🟢" if north > 0 else "🔴" if north < 0 else "⚪"
+                    lines.append(f"| 北向资金 | {arrow} {north:+.2f} | {'净流入' if north > 0 else '净流出' if north < 0 else '持平'} |")
+                if south is not None:
+                    arrow = "🟢" if south > 0 else "🔴" if south < 0 else "⚪"
+                    lines.append(f"| 南向资金 | {arrow} {south:+.2f} | {'净流入' if south > 0 else '净流出' if south < 0 else '持平'} |")
+                if main_val is not None:
+                    arrow = "🟢" if main_val > 0 else "🔴" if main_val < 0 else "⚪"
+                    lines.append(f"| 主力资金 | {arrow} {main_val:+.2f} | {main_desc} |")
+
+        # 行业板块资金流向排名
+        if overview.sector_capital_flow_top or overview.sector_capital_flow_bottom:
+            lines.append("")
+            if lang == "en":
+                lines.append("| Sector Capital Flow Top/Bottom | Net Inflow (100M) |")
+                lines.append("|----------------------------|-------------------|")
+            else:
+                lines.append("| 行业资金流向 TOP/BOTTOM | 净流入(亿) |")
+                lines.append("|------------------------|-----------|")
+
+            for s in overview.sector_capital_flow_top[:5]:
+                inflow = s.get('net_inflow', 0)
+                lines.append(f"| 🟢 {s.get('name', '-')} | +{inflow:.2f} |")
+            for s in overview.sector_capital_flow_bottom[:3]:
+                outflow = s.get('net_inflow', 0)
+                lines.append(f"| 🔴 {s.get('name', '-')} | {outflow:.2f} |")
+
+        return "\n".join(lines)
+
+    def _build_market_breadth_block(self, overview: MarketOverview) -> str:
+        """构建市场宽度表格（涨幅分布 + 涨停池明细）"""
+        has_distribution = bool(overview.gain_distribution)
+        has_limit_detail = bool(overview.limit_up_detail)
+        has_yest_chg = overview.yest_limit_avg_chg != 0.0
+
+        if not (has_distribution or has_limit_detail or has_yest_chg):
+            return ""
+
+        lang = self._get_review_language()
+        lines = []
+
+        if lang == "en":
+            lines.append("#### Market Breadth & Limit-up Details")
+        else:
+            lines.append("#### 市场宽度与涨停明细")
+
+        # 涨幅分布
+        dist = overview.gain_distribution
+        if dist:
+            total = dist.get('_total', 0)
+            # 移除内部字段
+            display_dist = {k: v for k, v in dist.items() if not k.startswith('_')}
+            if lang == "en":
+                lines.append(f"| Gain Range | Count | Ratio |")
+                lines.append("|-----------|-------|-------|")
+            else:
+                lines.append(f"| 涨幅区间 | 家数 | 占比 |")
+                lines.append("|----------|------|------|")
+
+            for range_label, count in display_dist.items():
+                ratio = f"{count / total * 100:.1f}%" if total else "N/A"
+                lines.append(f"| {range_label} | {count} | {ratio} |")
+
+        # 涨停池明细
+        detail = overview.limit_up_detail
+        if detail:
+            lines.append("")
+            if lang == "en":
+                lines.append(
+                    f"| Limit-up | Total | First-limit | Non-first | Broken | Broken Rate |"
+                )
+                lines.append(
+                    f"|----------|-------|-------------|----------|--------|------------|"
+                )
+                lines.append(
+                    f"| Count | **{detail.get('total', 0)}** | "
+                    f"{detail.get('first_limit', 0)} | "
+                    f"{detail.get('non_first_limit', 0)} | "
+                    f"{detail.get('broken_limit', 0)} | "
+                    f"{detail.get('broken_rate', 0)}% |"
+                )
+            else:
+                lines.append(
+                    "| 涨停统计 | 总计 | 一字板 | 非一字板 | 炸板数 | 炸板率 |"
+                )
+                lines.append(
+                    "|----------|------|--------|----------|--------|--------|"
+                )
+                lines.append(
+                    f"| 数量 | **{detail.get('total', 0)}**家 | "
+                    f"{detail.get('first_limit', 0)}家 | "
+                    f"{detail.get('non_first_limit', 0)}家 | "
+                    f"{detail.get('broken_limit', 0)}家 | "
+                    f"{detail.get('broken_rate', 0)}% |"
+                )
+
+        # 昨日涨停今日表现
+        yest_chg = overview.yest_limit_avg_chg
+        if has_yest_chg:
+            lines.append("")
+            if lang == "en":
+                arrow = "🟢" if yest_chg > 0 else "🔴" if yest_chg < 0 else "⚪"
+                sentiment = "strong" if yest_chg > 2 else ("weak" if yest_chg < -2 else "mixed")
+                lines.append(
+                    f"> Yest. limit-up avg today: **{arrow} {yest_chg:+.2f}%** ({sentiment} sentiment)"
+                )
+            else:
+                arrow = "🟢" if yest_chg > 0 else "🔴" if yest_chg < 0 else "⚪"
+                sentiment = "赚钱效应强" if yest_chg > 2 else ("亏钱效应" if yest_chg < -2 else "一般")
+                lines.append(
+                    f"> 昨日涨停股今日均涨幅：**{arrow} {yest_chg:+.2f}%**（{sentiment}）"
+                )
+
+        return "\n".join(lines)
+
+    def _build_index_technicals_block(self, overview: MarketOverview) -> str:
+        """构建指数技术面分析表格"""
+        if not overview.index_technicals:
+            return ""
+
+        lang = self._get_review_language()
+        lines = []
+
+        if lang == "en":
+            lines.append("#### Index Technical Analysis")
+            lines.append("| Index | MA Status | MACD | RSI | Volume | Score |")
+            lines.append("|-------|----------|------|-----|--------|-------|")
+        else:
+            lines.append("#### 指数技术面")
+            lines.append("| 指数 | 均线排列 | MACD | RSI | 量能 | 评分 |")
+            lines.append("|------|----------|------|-----|------|------|")
+
+        # 构建指数代码到名称的映射
+        index_name_map = {}
+        for idx in overview.indices:
+            if idx.code:
+                index_name_map[idx.code] = idx.name
+
+        for code, tech in overview.index_technicals.items():
+            name = index_name_map.get(code, code)
+            ma_status = tech.get('ma_status', '-')
+            macd_status = tech.get('macd_status', '-')
+            rsi_val = tech.get('rsi', 0)
+            rsi_status = tech.get('rsi_status', '-')
+            vol_status = tech.get('volume_status', '-')
+            score = tech.get('score', 0)
+
+            # RSI 显示值+状态
+            rsi_str = f"{rsi_val:.0f}({rsi_status})"
+
+            # 评分颜色标记
+            if score >= 70:
+                score_str = f"**{score}** 🔥"
+            elif score >= 50:
+                score_str = f"{score}"
+            else:
+                score_str = f"{score} ❄️"
+
+            lines.append(
+                f"| {name} | {ma_status} | {macd_status} | {rsi_str} | {vol_status} | {score_str} |"
+            )
+
+        return "\n".join(lines)
+
+    def _build_sector_persistence_block(self, overview: MarketOverview) -> str:
+        """构建板块持续性分析表格"""
+        if (not overview.persistent_leaders and not overview.new_leaders
+                and not overview.falling_leaders):
+            return ""
+
+        lang = self._get_review_language()
+        lines = []
+
+        if lang == "en":
+            lines.append("#### Sector Persistence Analysis")
+        else:
+            lines.append("#### 板块持续性分析")
+
+        persistent = overview.persistent_leaders
+        new_l = overview.new_leaders
+        falling = overview.falling_leaders
+
+        if lang == "en":
+            if persistent:
+                lines.append(f"- **Persistent leaders** (consecutive up): {', '.join(persistent)}")
+            if new_l:
+                lines.append(f"- **New leaders** (emerged today): {', '.join(new_l)}")
+            if falling:
+                lines.append(f"- **Falling leaders** (turned down): {', '.join(falling)}")
+        else:
+            if persistent:
+                lines.append(f"- **连续领涨**（昨日&今日均在榜）：{'、'.join(persistent)}")
+            if new_l:
+                lines.append(f"- **新晋领涨**（今日首次上榜）：{'、'.join(new_l)}")
+            if falling:
+                lines.append(f"- **由涨转跌**（昨日领涨今日跌出）：{'、'.join(falling)}")
+
+        # 给出判断结论
+        if persistent and len(persistent) >= 2:
+            if lang == "en":
+                lines.append("")
+                lines.append("> ✅ Strong sector continuity — leading theme likely persists.")
+            else:
+                lines.append("")
+                lines.append("> ✅ 板块连续性强，主线题材大概率延续。")
+        elif new_l and len(new_l) >= 3:
+            if lang == "en":
+                lines.append("")
+                lines.append("> ⚠️ Rapid sector rotation — watch for sustainability.")
+            else:
+                lines.append("")
+                lines.append("> ⚠️ 板块轮动加快，关注持续性。")
+        elif falling and len(falling) >= 2:
+            if lang == "en":
+                lines.append("")
+                lines.append("> 🔻 Multiple former leaders fading — caution on lagging sectors.")
+            else:
+                lines.append("")
+                lines.append("> 🔻 多个前领涨板块走弱，回避滞涨方向。")
+
+        return "\n".join(lines)
+
+    # ── 增强数据 Prompt 文本构建（注入给 LLM 的纯文本） ─────
+
+    def _build_capital_flow_prompt_text(self, overview: MarketOverview) -> str:
+        """构建资金流向的 Prompt 文本"""
+        if not overview.capital_flow and not overview.sector_capital_flow_top:
+            return ""
+        lines = ["## 资金流向数据"]
+        cf = overview.capital_flow
+        if cf:
+            lines.append(f"- 北向资金净流入: {cf.get('north_net_inflow', 'N/A')} 亿元")
+            if cf.get('southbound_net_inflow') is not None:
+                lines.append(f"- 南向资金净流入: {cf.get('southbound_net_inflow', 'N/A')} 亿港元")
+            if cf.get('main_net_inflow') is not None:
+                lines.append(
+                    f"- 主力资金净流入: {cf.get('main_net_inflow', 'N/A')} 亿元 "
+                    f"({cf.get('main_inflow_desc', '')})"
+                )
+        if overview.sector_capital_flow_top:
+            lines.append("- 行业资金净流入 TOP5:")
+            for s in overview.sector_capital_flow_top[:5]:
+                lines.append(f"  - {s['name']}: +{s.get('net_inflow', 0):.2f} 亿")
+        return "\n".join(lines)
+
+    def _build_market_breadth_prompt_text(self, overview: MarketOverview) -> str:
+        """构建市场宽度的 Prompt 文本"""
+        has_dist = bool(overview.gain_distribution)
+        has_detail = bool(overview.limit_up_detail)
+        has_yest = overview.yest_limit_avg_chg != 0.0
+        if not (has_dist or has_detail or has_yest):
+            return ""
+        lines = ["## 市场宽度与涨停明细"]
+        dist = overview.gain_distribution
+        if dist:
+            total = dist.get('_total', 0)
+            display_dist = {k: v for k, v in dist.items() if not k.startswith('_')}
+            parts = [f"{k}: {v}" for k, v in display_dist.items()]
+            lines.append(f"- 涨幅分布（共{total}只）: {' | '.join(parts)}")
+        detail = overview.limit_up_detail
+        if detail:
+            lines.append(
+                f"- 涨停池: 总计{detail.get('total', 0)}家, "
+                f"一字板{detail.get('first_limit', 0)}, "
+                f"炸板{detail.get('broken_limit', 0)}({detail.get('broken_rate', 0)}%)"
+            )
+        yest_chg = overview.yest_limit_avg_chg
+        if has_yest:
+            sentiment = "赚钱效应强" if yest_chg > 2 else ("亏钱效应" if yest_chg < -2 else "一般")
+            lines.append(f"- 昨日涨停股今日均涨幅: {yest_chg:+.2f}% ({sentiment})")
+        return "\n".join(lines)
+
+    def _build_index_technicals_prompt_text(self, overview: MarketOverview) -> str:
+        """构建指数技术面的 Prompt 文本"""
+        if not overview.index_technicals:
+            return ""
+        index_name_map = {idx.code: idx.name for idx in overview.indices if idx.code}
+        lines = ["## 指数技术面分析"]
+        for code, tech in overview.index_technicals.items():
+            name = index_name_map.get(code, code)
+            lines.append(
+                f"- **{name}**: MA={tech.get('ma_status', '-')}, "
+                f"MACD={tech.get('macd_status', '-')}, "
+                f"RSI={tech.get('rsi', 0):.0f}({tech.get('rsi_status', '-')}), "
+                f"量能={tech.get('volume_status', '-')}, "
+                f"综合评分={tech.get('score', 0)}"
+            )
+        return "\n".join(lines)
+
+    def _build_sector_persistence_prompt_text(self, overview: MarketOverview) -> str:
+        """构建板块持续性的 Prompt 文本"""
+        if (not overview.persistent_leaders and not overview.new_leaders
+                and not overview.falling_leaders):
+            return ""
+        lines = ["## 板块持续性分析"]
+        p = overview.persistent_leaders
+        n = overview.new_leaders
+        f = overview.falling_leaders
+        if p:
+            lines.append(f"- 连续领涨（昨日&今日均在榜）: {'、'.join(p)}")
+        if n:
+            lines.append(f"- 新晋领涨（今日首次上榜）: {'、'.join(n)}")
+        if f:
+            lines.append(f"- 由涨转跌（昨日领涨今日跌出）: {'、'.join(f)}")
+        # 结论
+        if len(p) >= 2:
+            lines.append("> 判断：板块连续性强，主线题材大概率延续。")
+        elif len(n) >= 3:
+            lines.append("> 判断：板块轮动加快，关注持续性。")
+        elif len(f) >= 2:
+            lines.append("> 判断：多个前领涨板块走弱，回避滞涨方向。")
+        return "\n".join(lines)
+
+    def _build_smart_picks_prompt_text(self, overview: MarketOverview) -> str:
+        """构建智能选股的 Prompt 文本（注入给 LLM 的结构化数据）"""
+        if not overview.recommended_stocks:
+            return ""
+
+        source_labels = {
+            'limit_up': '涨停池强势',
+            'sector_leader': '连续领涨龙头',
+            'hot_sector': '新晋热点龙头',
+            'capital_inflow': '资金流入龙头',
+        }
+
+        lines = ["## 🎯 建议关注个股 TOP 7（AI 智能选股）"]
+        lines.append("以下股票通过多维度策略综合筛选：")
+        lines.append("1. **涨停池强势股**（非一字板，资金认可度高）")
+        lines.append("2. **连续领涨板块龙头**（板块持续性强，龙头确定性高）")
+        lines.append("3. **新晋热点板块放量龙头**（新热点启动信号）")
+        lines.append("4. **资金大幅流入板块领头股**（主力资金方向）")
+        lines.append("")
+        lines.append("| # | 代码 | 名称 | 涨跌幅 | 板块 | 来源 | 推荐理由 | 信心度 |")
+        lines.append("|---|------|------|--------|------|------|---------|--------|")
+
+        for rank, stock in enumerate(overview.recommended_stocks[:7], 1):
+            src_label = source_labels.get(stock.pick_source, '推荐')
+            lines.append(
+                f"| {rank} | {stock.code} | {stock.name} | "
+                f"{stock.change_pct:+.1f}% | {stock.sector or '-'} | "
+                f"{src_label} | {stock.reason} | {stock.confidence:.0f}/100 |"
+            )
+
+        lines.append("")
+        lines.append(
+            "> ⚠️ 以上选股结果基于技术面+资金面+板块联动量化筛选，"
+            "仅供参考，不构成投资建议。请结合个人风险偏好独立判断。"
+        )
         return "\n".join(lines)
 
     @staticmethod
@@ -837,7 +1782,14 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 title = n.get('title', '')[:50]
                 snippet = n.get('snippet', '')[:100]
             news_text += f"{i}. {title}\n   {snippet}\n"
-        
+
+        # ── 增强数据：构建 Prompt 文本 ──
+        capital_flow_text = self._build_capital_flow_prompt_text(overview)
+        market_breadth_text = self._build_market_breadth_prompt_text(overview)
+        index_tech_text = self._build_index_technicals_prompt_text(overview)
+        sector_persist_text = self._build_sector_persistence_prompt_text(overview)
+        smart_picks_text = self._build_smart_picks_prompt_text(overview)
+
         # 按 region 组装市场概况与板块区块（美股无涨跌家数、板块数据）
         stats_block = ""
         sector_block = ""
@@ -996,6 +1948,16 @@ Output the report content directly, no extra commentary.
 
 ## 市场新闻
 {news_placeholder}
+
+{capital_flow_text if capital_flow_text else ""}
+
+{market_breadth_text if market_breadth_text else ""}
+
+{index_tech_text if index_tech_text else ""}
+
+{sector_persist_text if sector_persist_text else ""}
+
+{smart_picks_text if smart_picks_text else ""}
 
 {data_no_indices_hint}
 
