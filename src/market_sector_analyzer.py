@@ -59,6 +59,12 @@ class StockRecommendation:
     sector: str = ""               # 所属板块
     reason: str = ""               # 推荐理由
     confidence: float = 0.0        # 信心度 0-100
+    # ── 扩展字段（智能选股）──
+    pick_source: str = ""          # 来源：limit_up(涨停池) / sector_leader(板块龙头) / hot_sector(热门板块)
+    turnover_rate: float = 0.0     # 换手率
+    amount: float = 0.0            # 成交额（亿）
+    tech_score: float = 0.0        # 技术面评分 0-100
+    is_first_limit: bool = False   # 是否一字板
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -69,6 +75,10 @@ class StockRecommendation:
             'sector': self.sector,
             'reason': self.reason,
             'confidence': self.confidence,
+            'pick_source': self.pick_source,
+            'turnover_rate': self.turnover_rate,
+            'amount': self.amount,
+            'tech_score': self.tech_score,
         }
 
 
