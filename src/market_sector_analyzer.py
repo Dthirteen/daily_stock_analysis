@@ -59,6 +59,12 @@ class StockRecommendation:
     sector: str = ""               # 所属板块
     reason: str = ""               # 推荐理由
     confidence: float = 0.0        # 信心度 0-100
+    # ── 扩展字段（智能选股）──
+    pick_source: str = ""          # 来源：limit_up(涨停池) / sector_leader(板块龙头) / hot_sector(热门板块)
+    turnover_rate: float = 0.0     # 换手率
+    amount: float = 0.0            # 成交额（亿）
+    tech_score: float = 0.0        # 技术面评分 0-100
+    is_first_limit: bool = False   # 是否一字板
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -69,6 +75,10 @@ class StockRecommendation:
             'sector': self.sector,
             'reason': self.reason,
             'confidence': self.confidence,
+            'pick_source': self.pick_source,
+            'turnover_rate': self.turnover_rate,
+            'amount': self.amount,
+            'tech_score': self.tech_score,
         }
 
 
@@ -143,22 +153,52 @@ class MarketSectorAnalyzer:
     def _get_sector_leader(self, sector_name: str) -> Optional[Dict[str, Any]]:
         """
         获取板块龙头股（涨幅最大的股票）
-        
-        此方法需要对接数据源查询板块内涨幅最大的股票
-        暂时返回 None，可根据数据源能力完善
+
+        通过 DataFetcherManager.get_sector_constituents 获取板块成分股，
+        然后选取涨跌幅最大的作为龙头股。
         """
         try:
-            # 后续可接入数据源 API 获取板块成分股，然后找涨幅最大的
-            # 示例：
-            # members = self.data_manager.get_sector_members(sector_name)
-            # if members and not members.empty:
-            #     leader = members.loc[members['change_pct'].idxmax()]
-            #     return {'code': leader['code'], 'name': leader['name'], 'change_pct': leader['change_pct']}
-            pass
+            # 调用数据源获取板块成分股
+            df = self.data_manager.get_sector_constituents(sector_name)
+            if df is None or df.empty:
+                logger.debug(f"[板块分析] 板块 {sector_name} 成分股为空")
+                return None
+
+            # 确保 change_pct 列存在且为数值类型
+            if 'change_pct' not in df.columns:
+                logger.debug(f"[板块分析] 板块 {sector_name} 数据缺少 change_pct 列")
+                return None
+
+            df['change_pct'] = pd.to_numeric(df['change_pct'], errors='coerce')
+            df = df.dropna(subset=['change_pct'])
+
+            if df.empty:
+                return None
+
+            # 取涨幅最大的一只作为龙头股
+            leader_idx = df['change_pct'].idxmax()
+            leader = df.loc[leader_idx]
+
+            result = {
+                'code': str(leader.get('code', '')),
+                'name': leader.get('name', ''),
+                'change_pct': float(leader['change_pct']),
+            }
+
+            # 补充可选字段
+            for extra_key in ('price', 'turnover_rate', 'amount', 'market_cap'):
+                if extra_key in leader.columns or extra_key in leader.index:
+                    result[extra_key] = leader.get(extra_key)
+
+            logger.info(
+                f"[板块分析] {sector_name} 龙头股: {result['name']}({result['code']}) "
+                f"涨幅 {result['change_pct']:+.2f}%"
+            )
+            return result
+
         except Exception as e:
-            logger.debug(f"[板块分析] 获取板块龙头股失败: {e}")
-        
-        return None
+            logger.warning(f"[板块分析] 获取板块 {sector_name} 龙头股失败: {e}")
+            return None
     
     def calculate_sector_capital_weights(
         self,
