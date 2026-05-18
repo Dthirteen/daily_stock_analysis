@@ -79,6 +79,35 @@ class RSIStatus(Enum):
     OVERSOLD = "超卖"         # RSI < 30
 
 
+class KDJStatus(Enum):
+    """KDJ状态枚举"""
+    GOLDEN_CROSS = "金叉"       # K上穿J
+    OVERBOUGHT = "超买"         # K/J > 80
+    STRONG = "强势"            # K > D > 50
+    NEUTRAL = "中性"           # K ≈ D
+    WEAK = "弱势"              # K < D < 50
+    OVERSOLD = "超卖"          # K/J < 20
+    DEATH_CROSS = "死叉"       # K下穿D
+
+
+class BollingerStatus(Enum):
+    """布林带状态枚举"""
+    UPPER_TOUCH = "触及上轨"     # 价格接近/突破上轨
+    LOWER_TOUCH = "触及下轨"     # 价格接近/跌破下轨
+    SQUEEZE = "收窄"            # 带宽收窄（变盘前兆）
+    EXPAND = "扩张"             # 带宽放大（趋势加强）
+    MIDDLE = "中轨附近"        # 价格在中轨附近运行
+
+
+class OBVStatus(Enum):
+    """OBV（能量潮）状态枚举"""
+    RISING = "放量上行"        # OBV上升+价格上涨
+    FALLING = "缩量下行"       # OBV下降+价格下跌
+    DIVERGENCE_UP = "底背离"   # 价格新低但OBV未新低（看多信号）
+    DIVERGENCE_DOWN = "顶背离" # 价格新高但OBV未新高（看空信号）
+    FLAT = "持平"
+
+
 @dataclass
 class TrendAnalysisResult:
     """趋势分析结果"""
@@ -126,6 +155,26 @@ class TrendAnalysisResult:
     rsi_status: RSIStatus = RSIStatus.NEUTRAL
     rsi_signal: str = ""              # RSI 信号描述
 
+    # KDJ 指标
+    kdj_k: float = 0.0              # K值
+    kdj_d: float = 0.0              # D值
+    kdj_j: float = 0.0              # J值
+    kdj_status: KDJStatus = KDJStatus.NEUTRAL
+    kdj_signal: str = ""            # KDJ 信号描述
+
+    # 布林带指标
+    boll_upper: float = 0.0         # 上轨
+    boll_mid: float = 0.0           # 中轨
+    boll_lower: float = 0.0         # 下轨
+    boll_width: float = 0.0         # 带宽(%)
+    boll_status: BollingerStatus = BollingerStatus.MIDDLE
+    boll_signal: str = ""           # 布林带信号描述
+
+    # OBV（能量潮）指标
+    obv_trend: float = 0.0          # OBV 趋势（N日变化率%）
+    obv_status: OBVStatus = OBVStatus.FLAT
+    obv_signal: str = ""            # OBV 信号描述
+
     # 买入信号
     buy_signal: BuySignal = BuySignal.WAIT
     signal_score: int = 0            # 综合评分 0-100
@@ -165,6 +214,23 @@ class TrendAnalysisResult:
             'rsi_24': self.rsi_24,
             'rsi_status': self.rsi_status.value,
             'rsi_signal': self.rsi_signal,
+            # KDJ 指标
+            'kdj_k': self.kdj_k,
+            'kdj_d': self.kdj_d,
+            'kdj_j': self.kdj_j,
+            'kdj_status': self.kdj_status.value,
+            'kdj_signal': self.kdj_signal,
+            # 布林带指标
+            'boll_upper': self.boll_upper,
+            'boll_mid': self.boll_mid,
+            'boll_lower': self.boll_lower,
+            'boll_width': self.boll_width,
+            'boll_status': self.boll_status.value,
+            'boll_signal': self.boll_signal,
+            # OBV 指标
+            'obv_trend': self.obv_trend,
+            'obv_status': self.obv_status.value,
+            'obv_signal': self.obv_signal,
         }
 
 
@@ -179,6 +245,9 @@ class StockTrendAnalyzer:
     4. 买点识别 - 回踩 MA5/MA10 支撑
     5. MACD 指标 - 趋势确认和金叉死叉信号
     6. RSI 指标 - 超买超卖判断
+    7. KDJ 指标 - 随机震荡，捕捉短期超买超卖和金叉死叉
+    8. 布林带指标 - 波动率分析，判断价格相对位置和变盘信号
+    9. OBV 能量潮 - 量价配合验证，识别背离信号
     """
     
     # 交易参数配置（BIAS_THRESHOLD 从 Config 读取，见 _generate_signal）
@@ -197,6 +266,20 @@ class StockTrendAnalyzer:
     RSI_LONG = 24              # 长期RSI周期
     RSI_OVERBOUGHT = 70        # 超买阈值
     RSI_OVERSOLD = 30          # 超卖阈值
+
+    # KDJ 参数（标准9/3/3）
+    KDJ_N = 9                   # RSV计算周期
+    KDJ_M1 = 3                 # K值平滑周期
+    KDJ_M2 = 3                 # D值平滑周期
+    KDJ_OVERBOUGHT = 80        # 超买阈值
+    KDJ_OVERSOLD = 20          # 超卖阈值
+
+    # 布林带参数（标准20/2）
+    BOLL_PERIOD = 20           # 布林带周期
+    BOLL_STD_DEV = 2           # 标准差倍数
+
+    # OBV 参数
+    OBV_TREND_PERIOD = 5       # OBV趋势判断周期
     
     def __init__(self):
         """初始化分析器"""
@@ -226,9 +309,12 @@ class StockTrendAnalyzer:
         # 计算均线
         df = self._calculate_mas(df)
 
-        # 计算 MACD 和 RSI
+        # 计算 MACD、RSI、KDJ、布林带、OBV
         df = self._calculate_macd(df)
         df = self._calculate_rsi(df)
+        df = self._calculate_kdj(df)
+        df = self._calculate_bollinger(df)
+        df = self._calculate_obv(df)
 
         # 获取最新数据
         latest = df.iloc[-1]
@@ -256,7 +342,16 @@ class StockTrendAnalyzer:
         # 6. RSI 分析
         self._analyze_rsi(df, result)
 
-        # 7. 生成买入信号
+        # 7. KDJ 分析
+        self._analyze_kdj(df, result)
+
+        # 8. 布林带分析
+        self._analyze_bollinger(df, result)
+
+        # 9. OBV 分析
+        self._analyze_obv(df, result)
+
+        # 10. 生成买入信号
         self._generate_signal(result)
 
         return result
@@ -333,6 +428,96 @@ class StockTrendAnalyzer:
             # 添加到 DataFrame
             col_name = f'RSI_{period}'
             df[col_name] = rsi
+
+        return df
+
+    def _calculate_kdj(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        计算 KDJ 指标
+
+        公式：
+        - RSV = (Close - Low_N) / (High_N - Low_N) * 100
+        - K = SMA(RSV, M1)
+        - D = SMA(K, M2)
+        - J = 3*K - 2*D
+        """
+        df = df.copy()
+        n = self.KDJ_N
+
+        # 计算 N 日最高价和最低价
+        high_n = df['high'].rolling(window=n).max()
+        low_n = df['low'].rolling(window=n).min()
+
+        # 计算 RSV
+        rsv = (df['close'] - low_n) / (high_n - low_n) * 100
+        rsv = rsv.fillna(50)  # 默认中性值
+
+        # 计算 K 值（SMA 平滑）
+        k_list = [50]  # 初始值
+        for i in range(1, len(rsv)):
+            k_val = (2 / (self.KDJ_M1 + 1)) * rsv.iloc[i] + (self.KDJ_M1 - 1) / (self.KDJ_M1 + 1) * k_list[-1]
+            k_list.append(k_val)
+        df['KDJ_K'] = k_list
+
+        # 计算 D 值（对 K 再做平滑）
+        d_list = [50]
+        for i in range(1, len(df['KDJ_K'])):
+            d_val = (2 / (self.KDJ_M2 + 1)) * df['KDJ_K'].iloc[i] + (self.KDJ_M2 - 1) / (self.KDJ_M2 + 1) * d_list[-1]
+            d_list.append(d_val)
+        df['KDJ_D'] = d_list
+
+        # 计算 J 值
+        df['KDJ_J'] = 3 * df['KDJ_K'] - 2 * df['KDJ_D']
+
+        return df
+
+    def _calculate_bollinger(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        计算布林带指标
+
+        公式：
+        - 中轨 = MA(Close, N)
+        - 上轨 = 中轨 + K * Std(Close, N)
+        - 下轨 = 中轨 - K * Std(Close, N)
+        - 带宽 = (上轨 - 下轨) / 中轨 * 100
+        """
+        df = df.copy()
+
+        # 计算中轨（均线）
+        df['BOLL_MID'] = df['close'].rolling(window=self.BOLL_PERIOD).mean()
+
+        # 计算标准差
+        std = df['close'].rolling(window=self.BOLL_PERIOD).std()
+
+        # 计算上下轨
+        df['BOLL_UPPER'] = df['BOLL_MID'] + self.BOLL_STD_DEV * std
+        df['BOLL_LOWER'] = df['BOLL_MID'] - self.BOLL_STD_DEV * std
+
+        # 计算带宽
+        df['BOLL_WIDTH'] = (df['BOLL_UPPER'] - df['BOLL_LOWER']) / df['BOLL_MID'] * 100
+
+        return df
+
+    def _calculate_obv(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        计算 OBV（能量潮）指标
+
+        公式：
+        - 若 Close > PrevClose: OBV = 前日OBV + 当日成交量
+        - 若 Close < PrevClose: OBV = 前日OBV - 当日成交量
+        - 若 Close == PrevClose: OBV = 前日OBV
+        """
+        df = df.copy()
+
+        # 计算价格变化方向
+        price_change = df['close'].diff()
+
+        # 根据价格变化计算 OBV 变动量
+        obv_change = np.where(price_change > 0, df['volume'],
+                              np.where(price_change < 0, -df['volume'], 0))
+
+        # 累积计算 OBV
+        df['OBV'] = obv_change.cumsum()
 
         return df
     
@@ -580,33 +765,210 @@ class StockTrendAnalyzer:
             result.rsi_status = RSIStatus.OVERSOLD
             result.rsi_signal = f"⭐ RSI超卖({rsi_mid:.1f}<30)，反弹机会大"
 
+    def _analyze_kdj(self, df: pd.DataFrame, result: TrendAnalysisResult) -> None:
+        """
+        分析 KDJ 指标
+
+        核心信号：
+        - 金叉：K 上穿 D（买入信号）
+        - 死叉：K 下穿 D（卖出信号）
+        - 超买：J > 100 或 K/D > 80
+        - 超卖：J < 0 或 K/D < 20
+        """
+        if len(df) < self.KDJ_N + self.KDJ_M1 + self.KDJ_M2:
+            result.kdj_signal = "数据不足"
+            return
+
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        # 获取 KDJ 数据
+        result.kdj_k = float(latest['KDJ_K'])
+        result.kdj_d = float(latest['KDJ_D'])
+        result.kdj_j = float(latest['KDJ_J'])
+
+        k, d, j = result.kdj_k, result.kdj_d, result.kdj_j
+        prev_k = float(prev['KDJ_K'])
+        prev_d = float(prev['KDJ_D'])
+
+        # 判断金叉死叉
+        is_golden_cross = prev_k <= prev_d and k > d
+        is_death_cross = prev_k >= prev_d and k < d
+
+        # 判断 KDJ 状态
+        if is_golden_cross and j > 50:
+            result.kdj_status = KDJStatus.GOLDEN_CROSS
+            result.kdj_signal = "✅ KDJ金叉，短期买入信号"
+        elif is_death_cross:
+            result.kdj_status = KDJStatus.DEATH_CROSS
+            result.kdj_signal = "❌ KDJ死叉，短期卖出信号"
+        elif j > 100 or (k > self.KDJ_OVERBOUGHT and d > self.KDJ_OVERBOUGHT):
+            result.kdj_status = KDJStatus.OVERBOUGHT
+            result.kdj_signal = f"⚠️ KDJ超买(K:{k:.1f} D:{d:.1f} J:{j:.1f})，注意回调"
+        elif j < 0 or (k < self.KDJ_OVERSOLD and d < self.KDJ_OVERSOLD):
+            result.kdj_status = KDJStatus.OVERSOLD
+            result.kdj_signal = f"⭐ KDJ超卖(K:{k:.1f} D:{d:.1f} J:{j:.1f})，反弹机会"
+        elif k > d > 50:
+            result.kdj_status = KDJStatus.STRONG
+            result.kdj_signal = f"✓ KDJ强势(K>{D})，多头区域"
+        elif k < d < 50:
+            result.kdj_status = KDJStatus.WEAK
+            result.kdj_signal = f"⚡ KDJ弱势(K<D)，空头区域"
+        else:
+            result.kdj_status = KDJStatus.NEUTRAL
+            result.kdj_signal = f" KDJ中性(K:{k:.1f} D:{d:.1f})"
+
+    def _analyze_bollinger(self, df: pd.DataFrame, result: TrendAnalysisResult) -> None:
+        """
+        分析布林带指标
+
+        核心判断：
+        - 价格触及上轨：可能回调
+        - 价格触及下轨：可能反弹
+        - 带宽收窄：变盘前兆
+        - 带宽扩张：趋势加强
+        """
+        if len(df) < self.BOLL_PERIOD:
+            result.boll_signal = "数据不足"
+            return
+
+        latest = df.iloc[-1]
+        prev = df.iloc[-2] if len(df) >= 2 else latest
+
+        # 获取布林带数据
+        result.boll_upper = float(latest['BOLL_UPPER'])
+        result.boll_mid = float(latest['BOLL_MID'])
+        result.boll_lower = float(latest['BOLL_LOWER'])
+        result.boll_width = float(latest['BOLL_WIDTH'])
+
+        price = result.current_price
+        upper, mid, lower = result.boll_upper, result.boll_mid, result.boll_lower
+        width = result.boll_width
+        prev_width = float(prev['BOLL_WIDTH'])
+
+        # 计算价格在布林带中的相对位置（%）
+        if upper != lower:
+            position = (price - lower) / (upper - lower) * 100
+        else:
+            position = 50
+
+        # 判断价格位置和状态
+        if position >= 95:
+            result.boll_status = BollingerStatus.UPPER_TOUCH
+            result.boll_signal = f"⚠️ 接近上轨({price:.2f}/{upper:.2f})，短期压力"
+        elif position <= 5:
+            result.boll_status = BollingerStatus.LOWER_TOUCH
+            result.boll_signal = f"⭐ 接近下轨({price:.2f}/{lower:.2f})，支撑附近"
+        elif width < 10 and prev_width >= width:
+            result.boll_status = BollingerStatus.SQUEEZE
+            result.boll_signal = f"🔄 带宽收窄({width:.1f}%)，变盘前兆"
+        elif width > 20 and width > prev_width:
+            result.boll_status = BollingerStatus.EXPAND
+            result.boll_signal = f"📊 带宽扩张({width:.1f}%)，趋势加强"
+        elif 40 <= position <= 60:
+            result.boll_status = BollingerStatus.MIDDLE
+            result.boll_signal = f" 中轨附近运行({position:.0f}%位)"
+        else:
+            result.boll_status = BollingerStatus.MIDDLE
+            result.boll_signal = f" 布林带正常({position:.0f}%位)"
+
+    def _analyze_obv(self, df: pd.DataFrame, result: TrendAnalysisResult) -> None:
+        """
+        分析 OBV（能量潮）指标
+
+        核心判断：
+        - OBV上升+价格上涨：量价齐升（看多）
+        - OBV下降+价格下跌：量价齐跌（看空）
+        - 底背离：价格新低但OBV未新低（看多信号）
+        - 顶背离：价格新高但OBV未新高（看空信号）
+        """
+        if len(df) < self.OBV_TREND_PERIOD + 5:
+            result.obv_signal = "数据不足"
+            return
+
+        latest = df.iloc[-1]
+        period = self.OBV_TREND_PERIOD
+
+        # 计算 OBV 趋势变化率
+        obv_now = float(latest['OBV'])
+        obv_prev = float(df.iloc[-period - 1]['OBV']) if len(df) > period else obv_now
+
+        if obv_prev != 0:
+            result.obv_trend = (obv_now - obv_prev) / abs(obv_prev) * 100
+        else:
+            result.obv_trend = 0.0
+
+        # 检测背离信号
+        # 顶背离：近期价格新高但 OBV 未新高
+        recent_bars = min(10, len(df))
+        recent_high_price = df['high'].iloc[-recent_bars:].max()
+        recent_high_obv = df['OBV'].iloc[-recent_bars:].max()
+        prev_period = min(20, len(df) - recent_bars)
+        if prev_period > 0:
+            prev_high_price = df['high'].iloc[-(recent_bars + prev_period):-recent_bars].max() if len(df) > recent_bars + prev_period else recent_high_price * 0.95
+            prev_high_obv = df['OBV'].iloc[-(recent_bars + prev_period):-recent_bars].max() if len(df) > recent_bars + prev_period else recent_high_obv * 0.95
+        else:
+            prev_high_price = recent_high_price * 0.95
+            prev_high_obv = recent_high_obv * 0.95
+
+        # 判断 OBV 状态
+        price_up = result.current_price > df.iloc[-2]['close']
+
+        # 顶背离检测
+        if recent_high_price > prev_high_price * 1.02 and recent_high_obv <= prev_high_obv:
+            result.obv_status = OBVStatus.DIVERGENCE_DOWN
+            result.obv_signal = "⚠️ OBV顶背离！价格新高但量能未确认，警惕回调"
+
+        # 底背离检测
+        elif result.obv_trend > 3 and not price_up:
+            result.obv_status = OBVStatus.DIVERGENCE_UP
+            result.obv_signal = "⭐ OBV底背离！下跌缩量，反弹概率高"
+
+        # 正常状态判断
+        elif result.obv_trend > 5 and price_up:
+            result.obv_status = OBVStatus.RISING
+            result.obv_signal = f"✅ 放量上行(OBV+{result.obv_trend:.1f}%)，资金进场"
+        elif result.obv_trend < -5 and not price_up:
+            result.obv_status = OBVStatus.FALLING
+            result.obv_signal = f"⚠️ 缩量下行(OBV{result.obv_trend:.1f}%)，资金流出"
+        elif abs(result.obv_trend) <= 3:
+            result.obv_status = OBVStatus.FLAT
+            result.obv_signal = f" OBV持平({result.obv_trend:+.1f}%)，观望中"
+        else:
+            result.obv_status = OBVStatus.RISING if result.obv_trend > 0 else OBVStatus.FALLING
+            direction = "上升" if result.obv_trend > 0 else "下降"
+            result.obv_signal = f" OBV{direction}({result.obv_trend:+.1f}%)"
+
     def _generate_signal(self, result: TrendAnalysisResult) -> None:
         """
         生成买入信号
 
-        综合评分系统：
-        - 趋势（30分）：多头排列得分高
-        - 乖离率（20分）：接近 MA5 得分高
-        - 量能（15分）：缩量回调得分高
-        - 支撑（10分）：获得均线支撑得分高
-        - MACD（15分）：金叉和多头得分高
-        - RSI（10分）：超卖和强势得分高
+        综合评分系统（100分制）：
+        - 趋势（25分）：多头排列得分高
+        - 乖离率（15分）：接近 MA5 得分高
+        - 量能（10分）：缩量回调得分高
+        - 支撑（8分）：获得均线支撑得分高
+        - MACD（12分）：金叉和多头得分高
+        - RSI（8分）：超卖和强势得分高
+        - KDJ（10分）：金叉和超卖得分高
+        - 布林带（7分）：下轨支撑和带宽收窄得分高
+        - OBV（5分）：底背离和放量上行得分高
         """
         score = 0
         reasons = []
         risks = []
 
-        # === 趋势评分（30分）===
+        # === 趋势评分（25分）===
         trend_scores = {
-            TrendStatus.STRONG_BULL: 30,
-            TrendStatus.BULL: 26,
-            TrendStatus.WEAK_BULL: 18,
-            TrendStatus.CONSOLIDATION: 12,
-            TrendStatus.WEAK_BEAR: 8,
-            TrendStatus.BEAR: 4,
+            TrendStatus.STRONG_BULL: 25,
+            TrendStatus.BULL: 22,
+            TrendStatus.WEAK_BULL: 15,
+            TrendStatus.CONSOLIDATION: 10,
+            TrendStatus.WEAK_BEAR: 6,
+            TrendStatus.BEAR: 3,
             TrendStatus.STRONG_BEAR: 0,
         }
-        trend_score = trend_scores.get(result.trend_status, 12)
+        trend_score = trend_scores.get(result.trend_status, 10)
         score += trend_score
 
         if result.trend_status in [TrendStatus.STRONG_BULL, TrendStatus.BULL]:
@@ -614,7 +976,7 @@ class StockTrendAnalyzer:
         elif result.trend_status in [TrendStatus.BEAR, TrendStatus.STRONG_BEAR]:
             risks.append(f"⚠️ {result.trend_status.value}，不宜做多")
 
-        # === 乖离率评分（20分，强势趋势补偿）===
+        # === 乖离率评分（15分，强势趋势补偿）===
         bias = result.bias_ma5
         if bias != bias or bias is None:  # NaN or None defense
             bias = 0.0
@@ -632,45 +994,45 @@ class StockTrendAnalyzer:
         if bias < 0:
             # Price below MA5 (pullback)
             if bias > -3:
-                score += 20
+                score += 15
                 reasons.append(f"✅ 价格略低于MA5({bias:.1f}%)，回踩买点")
             elif bias > -5:
-                score += 16
+                score += 12
                 reasons.append(f"✅ 价格回踩MA5({bias:.1f}%)，观察支撑")
             else:
-                score += 8
+                score += 6
                 risks.append(f"⚠️ 乖离率过大({bias:.1f}%)，可能破位")
         elif bias < 2:
-            score += 18
+            score += 14
             reasons.append(f"✅ 价格贴近MA5({bias:.1f}%)，介入好时机")
         elif bias < base_threshold:
-            score += 14
+            score += 10
             reasons.append(f"⚡ 价格略高于MA5({bias:.1f}%)，可小仓介入")
         elif bias > effective_threshold:
-            score += 4
+            score += 2
             risks.append(
                 f"❌ 乖离率过高({bias:.1f}%>{effective_threshold:.1f}%)，严禁追高！"
             )
         elif bias > base_threshold and is_strong_trend:
-            score += 10
+            score += 7
             reasons.append(
                 f"⚡ 强势趋势中乖离率偏高({bias:.1f}%)，可轻仓追踪"
             )
         else:
-            score += 4
+            score += 3
             risks.append(
                 f"❌ 乖离率过高({bias:.1f}%>{base_threshold:.1f}%)，严禁追高！"
             )
 
-        # === 量能评分（15分）===
+        # === 量能评分（10分）===
         volume_scores = {
-            VolumeStatus.SHRINK_VOLUME_DOWN: 15,  # 缩量回调最佳
-            VolumeStatus.HEAVY_VOLUME_UP: 12,     # 放量上涨次之
-            VolumeStatus.NORMAL: 10,
-            VolumeStatus.SHRINK_VOLUME_UP: 6,     # 无量上涨较差
+            VolumeStatus.SHRINK_VOLUME_DOWN: 10,  # 缩量回调最佳
+            VolumeStatus.HEAVY_VOLUME_UP: 8,     # 放量上涨次之
+            VolumeStatus.NORMAL: 6,
+            VolumeStatus.SHRINK_VOLUME_UP: 4,     # 无量上涨较差
             VolumeStatus.HEAVY_VOLUME_DOWN: 0,    # 放量下跌最差
         }
-        vol_score = volume_scores.get(result.volume_status, 8)
+        vol_score = volume_scores.get(result.volume_status, 5)
         score += vol_score
 
         if result.volume_status == VolumeStatus.SHRINK_VOLUME_DOWN:
@@ -678,25 +1040,25 @@ class StockTrendAnalyzer:
         elif result.volume_status == VolumeStatus.HEAVY_VOLUME_DOWN:
             risks.append("⚠️ 放量下跌，注意风险")
 
-        # === 支撑评分（10分）===
+        # === 支撑评分（8分）===
         if result.support_ma5:
-            score += 5
+            score += 4
             reasons.append("✅ MA5支撑有效")
         if result.support_ma10:
-            score += 5
+            score += 4
             reasons.append("✅ MA10支撑有效")
 
-        # === MACD 评分（15分）===
+        # === MACD 评分（12分）===
         macd_scores = {
-            MACDStatus.GOLDEN_CROSS_ZERO: 15,  # 零轴上金叉最强
-            MACDStatus.GOLDEN_CROSS: 12,      # 金叉
-            MACDStatus.CROSSING_UP: 10,       # 上穿零轴
-            MACDStatus.BULLISH: 8,            # 多头
+            MACDStatus.GOLDEN_CROSS_ZERO: 12,  # 零轴上金叉最强
+            MACDStatus.GOLDEN_CROSS: 10,      # 金叉
+            MACDStatus.CROSSING_UP: 8,       # 上穿零轴
+            MACDStatus.BULLISH: 6,            # 多头
             MACDStatus.BEARISH: 2,            # 空头
             MACDStatus.CROSSING_DOWN: 0,       # 下穿零轴
             MACDStatus.DEATH_CROSS: 0,        # 死叉
         }
-        macd_score = macd_scores.get(result.macd_status, 5)
+        macd_score = macd_scores.get(result.macd_status, 4)
         score += macd_score
 
         if result.macd_status in [MACDStatus.GOLDEN_CROSS_ZERO, MACDStatus.GOLDEN_CROSS]:
@@ -706,15 +1068,15 @@ class StockTrendAnalyzer:
         else:
             reasons.append(result.macd_signal)
 
-        # === RSI 评分（10分）===
+        # === RSI 评分（8分）===
         rsi_scores = {
-            RSIStatus.OVERSOLD: 10,       # 超卖最佳
-            RSIStatus.STRONG_BUY: 8,     # 强势
-            RSIStatus.NEUTRAL: 5,        # 中性
-            RSIStatus.WEAK: 3,            # 弱势
+            RSIStatus.OVERSOLD: 8,       # 超卖最佳
+            RSIStatus.STRONG_BUY: 6,     # 强势
+            RSIStatus.NEUTRAL: 4,        # 中性
+            RSIStatus.WEAK: 2,            # 弱势
             RSIStatus.OVERBOUGHT: 0,       # 超买最差
         }
-        rsi_score = rsi_scores.get(result.rsi_status, 5)
+        rsi_score = rsi_scores.get(result.rsi_status, 4)
         score += rsi_score
 
         if result.rsi_status in [RSIStatus.OVERSOLD, RSIStatus.STRONG_BUY]:
@@ -724,12 +1086,68 @@ class StockTrendAnalyzer:
         else:
             reasons.append(result.rsi_signal)
 
+        # === KDJ 评分（10分）===
+        kdj_scores = {
+            KDJStatus.GOLDEN_CROSS: 10,      # 金叉最佳
+            KDJStatus.OVERSOLD: 9,           # 超卖
+            KDJStatus.STRONG: 7,             # 强势
+            KDJStatus.NEUTRAL: 4,            # 中性
+            KDJStatus.WEAK: 2,               # 弱势
+            KDJStatus.OVERBOUGHT: 0,         # 超买最差
+            KDJStatus.DEATH_CROSS: 0,        # 死叉最差
+        }
+        kdj_score = kdj_scores.get(result.kdj_status, 4)
+        score += kdj_score
+
+        if result.kdj_status in [KDJStatus.GOLDEN_CROSS, KDJStatus.OVERSOLD]:
+            reasons.append(f"✅ {result.kdj_signal}")
+        elif result.kdj_status in [KDJStatus.DEATH_CROSS, KDJStatus.OVERBOUGHT]:
+            risks.append(f"⚠️ {result.kdj_signal}")
+        else:
+            reasons.append(result.kdj_signal)
+
+        # === 布林带评分（7分）===
+        boll_scores = {
+            BollingerStatus.LOWER_TOUCH: 7,   # 触及下轨最佳
+            BollingerStatus.SQUEEZE: 6,       # 收窄变盘前兆
+            BollingerStatus.MIDDLE: 4,        # 中轨附近
+            BollingerStatus.EXPAND: 3,        # 扩张趋势加强
+            BollingerStatus.UPPER_TOUCH: 0,   # 触及上轨风险
+        }
+        boll_score = boll_scores.get(result.boll_status, 4)
+        score += boll_score
+
+        if result.boll_status == BollingerStatus.LOWER_TOUCH:
+            reasons.append(f"✅ {result.boll_signal}")
+        elif result.boll_status == BollingerStatus.UPPER_TOUCH:
+            risks.append(f"⚠️ {result.boll_signal}")
+        else:
+            reasons.append(result.boll_signal)
+
+        # === OBV 评分（5分）===
+        obv_scores = {
+            OBVStatus.DIVERGENCE_UP: 5,     # 底背离最佳
+            OBVStatus.RISING: 4,            # 放量上行
+            OBVStatus.FLAT: 2,              # 持平
+            OBVStatus.FALLING: 0,           # 缩量下行
+            OBVStatus.DIVERGENCE_DOWN: 0,    # 顶背离最差
+        }
+        obv_score = obv_scores.get(result.obv_status, 2)
+        score += obv_score
+
+        if result.obv_status == OBVStatus.DIVERGENCE_UP:
+            reasons.append(f"✅ {result.obv_signal}")
+        elif result.obv_status in [OBVStatus.DIVERGENCE_DOWN, OBVStatus.FALLING]:
+            risks.append(f"⚠️ {result.obv_signal}")
+        else:
+            reasons.append(result.obv_signal)
+
         # === 综合判断 ===
         result.signal_score = score
         result.signal_reasons = reasons
         result.risk_factors = risks
 
-        # 生成买入信号（调整阈值以适应新的100分制）
+        # 生成买入信号（基于100分制）
         if score >= 75 and result.trend_status in [TrendStatus.STRONG_BULL, TrendStatus.BULL]:
             result.buy_signal = BuySignal.STRONG_BUY
         elif score >= 60 and result.trend_status in [TrendStatus.STRONG_BULL, TrendStatus.BULL, TrendStatus.WEAK_BULL]:
@@ -781,6 +1199,19 @@ class StockTrendAnalyzer:
             f"   RSI(12): {result.rsi_12:.1f}",
             f"   RSI(24): {result.rsi_24:.1f}",
             f"   信号: {result.rsi_signal}",
+            f"",
+            f"📊 KDJ指标: {result.kdj_status.value}",
+            f"   K: {result.kdj_k:.1f}  D: {result.kdj_d:.1f}  J: {result.kdj_j:.1f}",
+            f"   信号: {result.kdj_signal}",
+            f"",
+            f"📈 布林带: {result.boll_status.value}",
+            f"   上轨: {result.boll_upper:.2f}  中轨: {result.boll_mid:.2f}  下轨: {result.boll_lower:.2f}",
+            f"   带宽: {result.boll_width:.1f}%",
+            f"   信号: {result.boll_signal}",
+            f"",
+            f"📊 OBV能量潮: {result.obv_status.value}",
+            f"   趋势变化: {result.obv_trend:+.1f}%",
+            f"   信号: {result.obv_signal}",
             f"",
             f"🎯 操作建议: {result.buy_signal.value}",
             f"   综合评分: {result.signal_score}/100",
