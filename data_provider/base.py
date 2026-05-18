@@ -325,6 +325,83 @@ class BaseFetcher(ABC):
         """
         return None
 
+    # ── 大盘增强数据接口 ──────────────────────────────────────
+
+    def get_capital_flow(self) -> Optional[Dict[str, Any]]:
+        """
+        获取资金流向数据（北向/南向/主力）
+
+        Returns:
+            Dict 包含（各字段可选，视数据源和市场而定）：
+              - north_net_inflow: 北向资金净流入（亿元）
+              - southbound_net_inflow: 南向资金净流入（亿港元）
+              - main_net_inflow: 主力资金净流入（亿元）
+              - main_inflow_desc: 主力资金流向描述文本
+              - retail_net_inflow: 散户资金净流入
+        """
+        return None
+
+    def get_sector_capital_flow(self, n: int = 5) -> Optional[Tuple[List[Dict], List[Dict]]]:
+        """
+        获取行业板块资金流向排名
+
+        Args:
+            n: 返回前n个
+
+        Returns:
+            Tuple: (净流入前n板块, 净流出前n板块)，每项包含 name, net_inflow 等
+        """
+        return None
+
+    def get_market_breadth(self) -> Optional[Dict[str, Any]]:
+        """
+        获取市场宽度数据（涨幅分布、涨停池明细等）
+
+        Returns:
+            Dict 包含：
+              - gain_distribution: 涨幅区间分布 {">5%": count, "3-5%": count, "0-3%": count, "<0%": count, "<-3%": count, "<-5%": count}
+              - limit_up_detail: 涨停池详情 {"total": int, "first_limit": int, "non_first_limit": int, "broken_limit": int, "broken_rate": float}
+              - yest_limit_avg_chg: 昨日涨停股今日平均涨跌幅(%)
+        """
+        return None
+
+    def get_index_daily_history(self, index_code: str, days: int = 60) -> Optional[pd.DataFrame]:
+        """
+        获取指数日线历史数据（用于技术分析）
+
+        Args:
+            index_code: 指数代码（如 sh000001, sz399001, sz399006）
+            days: 天数
+
+        Returns:
+            DataFrame 含 date/open/high/low/close/volume 列
+        """
+        return None
+
+    def get_sector_constituents(self, sector_name: str) -> Optional[pd.DataFrame]:
+        """
+        获取板块成分股列表（含涨跌幅、成交额等）
+
+        Args:
+            sector_name: 板块名称（如 '半导体', '白酒'）
+
+        Returns:
+            DataFrame 含 股票代码/名称/涨跌幅/成交额/换手率 等列
+        """
+        return None
+
+    def get_limit_up_pool_stocks(self, date_str: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        获取涨停池个股详情（用于筛选强势股）
+
+        Args:
+            date_str: 日期字符串 YYYYMMDD，默认今天
+
+        Returns:
+            [ {code, name, change_pct, reason, ...}, ... ]
+        """
+        return []
+
     def get_daily_data(
         self,
         stock_code: str, 
@@ -2498,3 +2575,83 @@ class DataFetcherManager:
             return top, bottom
         logger.warning(f"[板块排行] 所有数据源均失败，最终错误: {last_error}")
         return [], []
+
+    # ── 大盘增强数据调度方法 ─────────────────────────────────────
+
+    def get_capital_flow(self) -> Dict[str, Any]:
+        """获取资金流向（自动切换数据源）"""
+        for fetcher in self._fetchers:
+            try:
+                data = fetcher.get_capital_flow()
+                if data:
+                    logger.info(f"[{fetcher.name}] 获取资金流向成功")
+                    return data
+            except Exception as e:
+                logger.warning(f"[{fetcher.name}] 获取资金流向失败: {e}")
+                continue
+        return {}
+
+    def get_sector_capital_flow(self, n: int = 5) -> Tuple[List[Dict], List[Dict]]:
+        """获取行业板块资金流向排名（自动切换数据源）"""
+        for fetcher in self._fetchers:
+            try:
+                data = fetcher.get_sector_capital_flow(n)
+                if data and data[0]:
+                    logger.info(f"[{fetcher.name}] 获取板块资金流向成功")
+                    return data
+            except Exception as e:
+                logger.warning(f"[{fetcher.name}] 获取板块资金流向失败: {e}")
+                continue
+        return [], []
+
+    def get_market_breadth(self) -> Dict[str, Any]:
+        """获取市场宽度数据（自动切换数据源）"""
+        for fetcher in self._fetchers:
+            try:
+                data = fetcher.get_market_breadth()
+                if data:
+                    logger.info(f"[{fetcher.name}] 获取市场宽度成功")
+                    return data
+            except Exception as e:
+                logger.warning(f"[{fetcher.name}] 获取市场宽度失败: {e}")
+                continue
+        return {}
+
+    def get_index_daily_history(self, index_code: str, days: int = 60) -> Optional[pd.DataFrame]:
+        """获取指数日线历史数据（自动切换数据源）"""
+        for fetcher in self._fetchers:
+            try:
+                df = fetcher.get_index_daily_history(index_code, days)
+                if df is not None and not df.empty:
+                    logger.info(f"[{fetcher.name}] 获取指数 {index_code} 日线成功，{len(df)} 条")
+                    return df
+            except Exception as e:
+                logger.warning(f"[{fetcher.name}] 获取指数 {index_code} 日线失败: {e}")
+                continue
+        return None
+
+    def get_sector_constituents(self, sector_name: str) -> Optional[pd.DataFrame]:
+        """获取板块成分股（自动切换数据源）"""
+        for fetcher in self._fetchers:
+            try:
+                df = fetcher.get_sector_constituents(sector_name)
+                if df is not None and not df.empty:
+                    logger.info(f"[{fetcher.name}] 获取板块 {sector_name} 成分股成功，{len(df)} 只")
+                    return df
+            except Exception as e:
+                logger.warning(f"[{fetcher.name}] 获取板块成分股失败: {e}")
+                continue
+        return None
+
+    def get_limit_up_pool_stocks(self, date_str: str = None) -> List[Dict[str, Any]]:
+        """获取涨停池个股详情（自动切换数据源）"""
+        for fetcher in self._fetchers:
+            try:
+                data = fetcher.get_limit_up_pool_stocks(date_str)
+                if data:
+                    logger.info(f"[{fetcher.name}] 获取涨停池个股成功，{len(data)} 只")
+                    return data
+            except Exception as e:
+                logger.warning(f"[{fetcher.name}] 获取涨停池个股失败: {e}")
+                continue
+        return []
