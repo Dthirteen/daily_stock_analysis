@@ -8,6 +8,7 @@
 1. 获取大盘指数数据（上证、深证、创业板）
 2. 搜索市场新闻形成复盘情报
 3. 使用大模型生成每日大盘复盘报告
+4. 增强板块分析（资金量权重、推荐个股）
 """
 
 import logging
@@ -23,6 +24,10 @@ from src.report_language import normalize_report_language
 from src.search_service import SearchService
 from src.core.market_profile import get_profile, MarketProfile
 from src.core.market_strategy import get_market_strategy_blueprint
+from src.market_sector_analyzer import (
+    MarketSectorAnalyzer, SectorWithCapital, StockRecommendation,
+    build_sector_capital_block, build_stock_recommendation_block
+)
 from data_provider.base import DataFetcherManager
 
 logger = logging.getLogger(__name__)
@@ -32,6 +37,7 @@ _ENGLISH_SECTION_PATTERNS = {
     "market_summary": r"###\s*(?:1\.\s*)?Market Summary",
     "index_commentary": r"###\s*(?:2\.\s*)?(?:Index Commentary|Major Indices)",
     "sector_highlights": r"###\s*(?:4\.\s*)?(?:Sector Highlights|Sector/Theme Highlights)",
+    "stock_recommendations": r"###\s*(?:Stock Recommendations|Watchlist)",
 }
 
 _CHINESE_SECTION_PATTERNS = {
@@ -39,6 +45,7 @@ _CHINESE_SECTION_PATTERNS = {
     "index_commentary": r"###\s*二、(?:指数结构|指数点评|主要指数)",
     "sector_highlights": r"###\s*三、(?:板块主线|热点解读|板块表现)",
     "funds_sentiment": r"###\s*四、(?:资金与情绪|资金动向)",
+    "stock_recommendations": r"###\s*(?:值得关注的个股|个股推荐|关注名单)",
     "news_catalysts": r"###\s*五、(?:消息催化|后市展望)",
 }
 
@@ -91,6 +98,12 @@ class MarketOverview:
     # 板块涨幅榜
     top_sectors: List[Dict] = field(default_factory=list)     # 涨幅前5板块
     bottom_sectors: List[Dict] = field(default_factory=list)  # 跌幅前5板块
+    
+    # 增强板块数据
+    top_sectors_enhanced: List[SectorWithCapital] = field(default_factory=list)  # 增强的领涨板块
+    bottom_sectors_enhanced: List[SectorWithCapital] = field(default_factory=list)  # 增强的领跌板块
+    sector_capital_weights: Dict[str, float] = field(default_factory=dict)  # 板块资金权重
+    recommended_stocks: List[StockRecommendation] = field(default_factory=list)  # 推荐个股
 
 
 class MarketAnalyzer:
@@ -100,7 +113,7 @@ class MarketAnalyzer:
     功能：
     1. 获取大盘指数实时行情
     2. 获取市场涨跌统计
-    3. 获取板块涨跌榜
+    3. 获取板块涨跌榜（增强资金量、龙头股、推荐个股）
     4. 搜索市场新闻
     5. 生成大盘复盘报告
     """
@@ -126,6 +139,7 @@ class MarketAnalyzer:
         self.region = region if region in ("cn", "us", "hk") else "cn"
         self.profile: MarketProfile = get_profile(self.region)
         self.strategy = get_market_strategy_blueprint(self.region)
+        self.sector_analyzer = MarketSectorAnalyzer(self.data_manager)
 
     def _get_review_language(self) -> str:
         configured = normalize_report_language(
@@ -298,7 +312,10 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         if self.profile.has_sector_rankings:
             self._get_sector_rankings(overview)
         
-        # 4. 获取北向资金（可选）
+        # 4. 增强板块分析（资金量权重、推荐个股）
+        self._enhance_sector_analysis(overview)
+        
+        # 5. 获取北向资金（可选）
         # self._get_north_flow(overview)
         
         return overview
@@ -380,6 +397,31 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
         except Exception as e:
             logger.error(f"[大盘] 获取板块涨跌榜失败: {e}")
+
+    def _enhance_sector_analysis(self, overview: MarketOverview):
+        """
+        增强板块分析：添加资金量、龙头股、推荐个股
+        """
+        try:
+            logger.info("[大盘] 开始增强板块分析...")
+            
+            # 1. 获取增强的板块数据（包含资金量、龙头股）
+            top_enhanced, bottom_enhanced = self.sector_analyzer.get_sector_rankings_with_capital(5)
+            overview.top_sectors_enhanced = top_enhanced
+            overview.bottom_sectors_enhanced = bottom_enhanced
+            
+            # 2. 计算板块资金权重
+            weights = self.sector_analyzer.calculate_sector_capital_weights(top_enhanced, bottom_enhanced)
+            overview.sector_capital_weights = weights
+            
+            # 3. 推荐值得关注的个股
+            recommendations = self.sector_analyzer.get_recommended_stocks(top_enhanced, max_stocks=5)
+            overview.recommended_stocks = recommendations
+            
+            logger.info(f"[大盘] 增强分析完成：推荐 {len(recommendations)} 支个股")
+            
+        except Exception as e:
+            logger.error(f"[大盘] 增强板块分析失败: {e}")
     
     # def _get_north_flow(self, overview: MarketOverview):
     #     """获取北向资金流入"""
@@ -483,6 +525,8 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         stats_block = self._build_stats_block(overview)
         indices_block = self._build_indices_block(overview)
         sector_block = self._build_sector_block(overview)
+        sector_capital_block = self._build_sector_capital_block(overview)
+        stock_recommendation_block = self._build_stock_recommendation_block(overview)
         news_block = self._build_news_block(news or [])
         patterns = (
             _ENGLISH_SECTION_PATTERNS
@@ -504,11 +548,18 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 indices_block,
             )
 
-        if sector_block:
+        if sector_capital_block:
             review = self._insert_after_section(
                 review,
                 patterns["sector_highlights"],
-                sector_block,
+                sector_capital_block,
+            )
+
+        if stock_recommendation_block and "stock_recommendations" in patterns:
+            review = self._insert_after_section(
+                review,
+                patterns["stock_recommendations"],
+                stock_recommendation_block,
             )
 
         if news_block and "news_catalysts" in patterns:
@@ -634,6 +685,26 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 )
         return "\n".join(lines)
 
+    def _build_sector_capital_block(self, overview: MarketOverview) -> str:
+        """Build sector capital analysis block with weights and leaders."""
+        if not overview.top_sectors_enhanced and not overview.bottom_sectors_enhanced:
+            return ""
+        return build_sector_capital_block(
+            overview.top_sectors_enhanced,
+            overview.bottom_sectors_enhanced,
+            overview.sector_capital_weights,
+            language=self._get_review_language()
+        )
+
+    def _build_stock_recommendation_block(self, overview: MarketOverview) -> str:
+        """Build stock recommendation block."""
+        if not overview.recommended_stocks:
+            return ""
+        return build_stock_recommendation_block(
+            overview.recommended_stocks,
+            language=self._get_review_language()
+        )
+
     def _build_news_block(self, news: List) -> str:
         """Build a compact news catalyst table for the rendered report."""
         if not news:
@@ -750,6 +821,11 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         top_sectors_text = ", ".join([f"{s['name']}({s['change_pct']:+.2f}%)" for s in overview.top_sectors[:3]])
         bottom_sectors_text = ", ".join([f"{s['name']}({s['change_pct']:+.2f}%)" for s in overview.bottom_sectors[:3]])
         
+        # 推荐个股
+        stocks_text = ""
+        for stock in overview.recommended_stocks[:5]:
+            stocks_text += f"- {stock.code} {stock.name}: {stock.reason}\n"
+        
         # 新闻信息 - 支持 SearchResult 对象或字典
         news_text = ""
         for i, n in enumerate(news[:6], 1):
@@ -765,6 +841,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         # 按 region 组装市场概况与板块区块（美股无涨跌家数、板块数据）
         stats_block = ""
         sector_block = ""
+        stocks_block = ""
         if review_language == "en":
             if self.profile.has_market_stats:
                 stats_block = f"""## Market Breadth
@@ -780,6 +857,10 @@ Leading: {top_sectors_text if top_sectors_text else "N/A"}
 Lagging: {bottom_sectors_text if bottom_sectors_text else "N/A"}"""
             else:
                 sector_block = "## Sector Performance\n(Sector data not available for this market.)"
+            
+            if stocks_text:
+                stocks_block = f"""## Recommended Stocks
+{stocks_text}"""
         else:
             if self.profile.has_market_stats:
                 stats_block = f"""## 市场概况
@@ -795,6 +876,10 @@ Lagging: {bottom_sectors_text if bottom_sectors_text else "N/A"}"""
 领跌: {bottom_sectors_text if bottom_sectors_text else "暂无数据"}"""
             else:
                 sector_block = "## 板块表现\n（该市场暂无板块涨跌数据）"
+            
+            if stocks_text:
+                stocks_block = f"""## 值得关注的个股
+{stocks_text}"""
 
         data_no_indices_hint = (
             "注意：由于行情数据获取失败，请主要根据【市场新闻】进行定性分析和总结，不要编造具体的指数点位。"
@@ -838,6 +923,8 @@ Lagging: {bottom_sectors_text if bottom_sectors_text else "N/A"}"""
 
 {sector_block}
 
+{stocks_block}
+
 ## Market News
 {news_placeholder}
 
@@ -863,14 +950,17 @@ Lagging: {bottom_sectors_text if bottom_sectors_text else "N/A"}"""
 ### 4. Sector Highlights
 (Analyze the drivers behind the leading and lagging sectors or themes.)
 
-### 5. Outlook
+### 5. Stock Recommendations
+(Focus on the 5 recommended stocks and their investment rationale.)
+
+### 6. Outlook
 (Provide the near-term outlook based on price action and news.)
 
-### 6. Risk Alerts
+### 7. Risk Alerts
 (List the main risks to monitor.)
 
-### 7. Strategy Plan
-(Provide an offensive/balanced/defensive stance, a position-sizing guideline, one invalidation trigger, and end with “For reference only, not investment advice.”)
+### 8. Strategy Plan
+(Provide an offensive/balanced/defensive stance, a position-sizing guideline, one invalidation trigger, and end with "For reference only, not investment advice.")
 
 ---
 
@@ -902,6 +992,8 @@ Output the report content directly, no extra commentary.
 
 {sector_block}
 
+{stocks_block}
+
 ## 市场新闻
 {news_placeholder}
 
@@ -918,25 +1010,28 @@ Output the report content directly, no extra commentary.
 > 一句话给出今日市场状态、核心矛盾和明日优先观察方向。
 
 ### 一、盘面总览
-（2-3句话概括指数、涨跌家数、成交额和情绪温度，明确“强势/偏暖/震荡/偏弱”判断）
+（2-3句话概括指数、涨跌家数、成交额和情绪温度，明确"强势/偏暖/震荡/偏弱"判断）
 
 ### 二、指数结构
 （{self._get_index_hint()}，说明谁在护盘、谁在拖累，以及关键支撑/压力）
 
 ### 三、板块主线
-（分析领涨/领跌板块背后的逻辑、持续性和是否形成主线）
+（分析领涨/领跌板块背后的逻辑、持续性和是否形成主线；分析板块资金量权重）
 
-### 四、资金与情绪
+### 四、值得关注的个股 TOP 5
+（基于领涨板块，选出5支龙头股或高成长潜力个股，给出简要投资逻辑）
+
+### 五、资金与情绪
 （解读成交额、涨跌停结构、市场宽度和风险偏好）
 
-### 五、消息催化
+### 六、消息催化
 （结合近三日新闻，提炼真正影响明日交易的催化或扰动）
 
-### 六、明日交易计划
+### 七、明日交易计划
 （给出进攻/均衡/防守结论、仓位区间、关注方向、回避方向和一个触发失效条件）
 
-### 七、风险提示
-（列出需要关注的风险点；最后补充“建议仅供参考，不构成投资建议”。）
+### 八、风险提示
+（列出需要关注的风险点；最后补充"建议仅供参考，不构成投资建议"。）
 
 ---
 
@@ -1027,6 +1122,8 @@ Market conditions can change quickly. The data above is for reference only and d
         dashboard_block = self._build_stats_block(overview)
         indices_block = self._build_indices_block(overview)
         sector_block = self._build_sector_block(overview)
+        sector_capital_block = self._build_sector_capital_block(overview)
+        stock_recommendation_block = self._build_stock_recommendation_block(overview)
         return f"""## {overview.date} 大盘复盘
 
 > 今日{market_label}市场整体呈现**{market_mood}**态势，优先观察指数承接、成交额变化和板块持续性。
@@ -1038,21 +1135,24 @@ Market conditions can change quickly. The data above is for reference only and d
 {indices_block or indices_text or "暂无指数数据。"}
 
 ### 三、板块主线
-{sector_block or "- 暂无板块涨跌榜数据。"}
+{sector_capital_block or sector_block or "- 暂无板块涨跌榜数据。"}
 
-### 四、资金与情绪
+### 四、值得关注的个股 TOP 5
+{stock_recommendation_block or "暂无个股推荐。"}
+
+### 五、资金与情绪
 - 结合成交额和涨跌家数看，当前更适合等待确认，避免仅凭单一热点追高。
 
-### 五、消息催化
+### 六、消息催化
 - 暂无可用新闻时，应降低对题材持续性的确定性判断。
 
-### 六、明日交易计划
+### 七、明日交易计划
 - **结论**：均衡观察。
 - **仓位**：控制在中性区间，等待指数与主线共振。
 - **关注方向**：{top_text or "强于指数的主线板块"}。
 - **回避方向**：{bottom_text or "连续走弱且缺少修复信号的方向"}。
 
-### 七、风险提示
+### 八、风险提示
 - 市场有风险，投资需谨慎。以上数据仅供参考，不构成投资建议。
 
 ---
