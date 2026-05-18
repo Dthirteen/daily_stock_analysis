@@ -1019,9 +1019,150 @@ class NotificationService(
                         for item in checklist:
                             report_lines.append(f"- {item}")
                         report_lines.append("")
-                
-                # 如果没有 dashboard，显示传统格式
-                if not dashboard:
+
+                # ========== AI 完整分析详情 ==========
+                # 输出 LLM 返回的所有分析维度文本（trend_analysis / technical_analysis 等）
+                has_detail = False
+
+                # 综合摘要与核心看点
+                if result.analysis_summary or result.key_points:
+                    has_detail = True
+                    report_lines.extend([
+                        f"### 📝 {labels.get('analysis_summary_label', '综合分析')}",
+                        "",
+                    ])
+                    if result.analysis_summary:
+                        report_lines.append(f"{result.analysis_summary}")
+                        report_lines.append("")
+                    if result.key_points:
+                        report_lines.append(f"**🔑 {labels.get('key_points_label', '核心看点')}**: {result.key_points}")
+                        report_lines.append("")
+
+                # 走势分析
+                if result.trend_analysis:
+                    has_detail = True
+                    report_lines.extend([
+                        f"### 📈 {labels.get('trend_analysis_label', '走势形态分析')}",
+                        "",
+                        f"{result.trend_analysis}",
+                        "",
+                    ])
+
+                # 技术面分析（含均线、量能、K线形态）
+                has_technical = any([
+                    result.technical_analysis,
+                    result.ma_analysis,
+                    result.volume_analysis,
+                    result.pattern_analysis,
+                ])
+                if has_technical:
+                    has_detail = True
+                    report_lines.extend([
+                        f"### 📊 {technical_heading}",
+                        "",
+                    ])
+                    if result.ma_analysis:
+                        report_lines.append(f"**{ma_label}**: {result.ma_analysis}")
+                        report_lines.append("")
+                    if result.volume_analysis:
+                        report_lines.append(f"**{volume_analysis_label}**: {result.volume_analysis}")
+                        report_lines.append("")
+                    if result.pattern_analysis:
+                        pattern_label = labels.get('pattern_analysis_label', 'K线形态')
+                        report_lines.append(f"**{pattern_label}**: {result.pattern_analysis}")
+                        report_lines.append("")
+                    if result.technical_analysis:
+                        report_lines.append(f"**{labels.get('technical_comprehensive_label', '技术面综合')}**: {result.technical_analysis}")
+                        report_lines.append("")
+
+                # 短期/中期展望
+                if result.short_term_outlook or result.medium_term_outlook:
+                    has_detail = True
+                    report_lines.extend([
+                        f"### 🔭 {labels.get('outlook_label', '走势展望')}",
+                        "",
+                    ])
+                    if result.short_term_outlook:
+                        short_label = labels.get('short_term_label', '短期(1-3日)')
+                        report_lines.append(f"**{short_label}**: {result.short_term_outlook}")
+                        report_lines.append("")
+                    if result.medium_term_outlook:
+                        mid_label = labels.get('medium_term_label', '中期(1-2周)')
+                        report_lines.append(f"**{mid_label}**: {result.medium_term_outlook}")
+                        report_lines.append("")
+
+                # 基本面分析
+                if result.fundamental_analysis:
+                    has_detail = True
+                    report_lines.extend([
+                        f"### 📋 {labels.get('fundamental_label', '基本面分析')}",
+                        "",
+                        f"{result.fundamental_analysis}",
+                        "",
+                    ])
+
+                # 板块行业
+                if result.sector_position:
+                    has_detail = True
+                    sector_label = labels.get('sector_position_label', '板块行业')
+                    report_lines.extend([
+                        f"### 🏭 {sector_label}",
+                        "",
+                        f"{result.sector_position}",
+                        "",
+                    ])
+
+                # 公司亮点/风险
+                if result.company_highlights:
+                    has_detail = True
+                    company_label = labels.get('company_highlights_label', '公司亮点/风险')
+                    report_lines.extend([
+                        f"### 💡 {company_label}",
+                        "",
+                        f"{result.company_highlights}",
+                        "",
+                    ])
+
+                # 操作理由与风险提示
+                if result.buy_reason or result.risk_warning:
+                    has_detail = True
+                    if result.buy_reason:
+                        report_lines.extend([
+                            f"**💡 {reason_label}**: {result.buy_reason}",
+                            "",
+                        ])
+                    if result.risk_warning:
+                        report_lines.extend([
+                            f"**⚠️ {risk_warning_label}**: {result.risk_warning}",
+                            "",
+                        ])
+
+                # 消息面
+                if result.news_summary or result.market_sentiment or result.hot_topics:
+                    has_detail = True
+                    report_lines.extend([f"### 📰 {news_heading}", ""])
+                    if result.news_summary:
+                        report_lines.append(f"{result.news_summary}")
+                        report_lines.append("")
+                    if result.market_sentiment:
+                        sentiment_label = labels.get('market_sentiment_label', '市场情绪')
+                        report_lines.append(f"**{sentiment_label}**: {result.market_sentiment}")
+                        report_lines.append("")
+                    if result.hot_topics:
+                        topics_label = labels.get('hot_topics_label', '相关热点')
+                        report_lines.append(f"**{topics_label}**: {result.hot_topics}")
+                        report_lines.append("")
+
+                # 数据来源
+                if result.data_sources:
+                    sources_label = labels.get('data_sources_label', '数据来源')
+                    report_lines.extend([
+                        f"📎 *{sources_label}: {result.data_sources}*",
+                        "",
+                    ])
+
+                # 如果没有 dashboard 且上面也没有任何详情，走传统格式兜底
+                if not dashboard and not has_detail:
                     # 操作理由
                     if result.buy_reason:
                         report_lines.extend([
@@ -1473,7 +1614,81 @@ class NotificationService(
                 f"- 💼 **{labels['has_position_label']}**: {pos_advice.get('has_position', labels['continue_holding'])}",
                 "",
             ])
-        
+
+        # ========== AI 完整分析详情 ==========
+        if result.analysis_summary or result.key_points:
+            lines.extend([f"### 📝 {labels.get('analysis_summary_label', '综合分析')}", ""])
+            if result.analysis_summary:
+                lines.append(f"{result.analysis_summary}")
+                lines.append("")
+            if result.key_points:
+                lines.append(f"**🔑 {labels.get('key_points_label', '核心看点')}**: {result.key_points}")
+                lines.append("")
+
+        if result.trend_analysis:
+            lines.extend([
+                f"### 📈 {labels.get('trend_analysis_label', '走势形态分析')}",
+                "",
+                f"{result.trend_analysis}",
+                "",
+            ])
+
+        has_technical = any([result.technical_analysis, result.ma_analysis, result.volume_analysis, result.pattern_analysis])
+        if has_technical:
+            lines.extend([f"### 📊 {labels.get('technical_heading', '技术面分析')}", ""])
+            if result.ma_analysis:
+                lines.append(f"**{labels.get('ma_label', '均线')}**: {result.ma_analysis}")
+                lines.append("")
+            if result.volume_analysis:
+                lines.append(f"**{labels.get('volume_analysis_label', '量能')}**: {result.volume_analysis}")
+                lines.append("")
+            if result.pattern_analysis:
+                lines.append(f"**{labels.get('pattern_analysis_label', 'K线形态')}**: {result.pattern_analysis}")
+                lines.append("")
+            if result.technical_analysis:
+                lines.append(f"**{labels.get('technical_comprehensive_label', '综合')}**: {result.technical_analysis}")
+                lines.append("")
+
+        if result.short_term_outlook or result.medium_term_outlook:
+            lines.extend([f"### 🔭 {labels.get('outlook_label', '走势展望')}", ""])
+            if result.short_term_outlook:
+                lines.append(f"**{labels.get('short_term_label', '短期')}**: {result.short_term_outlook}")
+                lines.append("")
+            if result.medium_term_outlook:
+                lines.append(f"**{labels.get('medium_term_label', '中期')}**: {result.medium_term_outlook}")
+                lines.append("")
+
+        if result.fundamental_analysis:
+            lines.extend([
+                f"### 📋 {labels.get('fundamental_label', '基本面分析')}",
+                "",
+                f"{result.fundamental_analysis}",
+                "",
+            ])
+
+        if result.sector_position:
+            lines.extend([
+                f"### 🏭 {labels.get('sector_position_label', '板块行业')}",
+                "",
+                f"{result.sector_position}",
+                "",
+            ])
+
+        if result.company_highlights:
+            lines.extend([
+                f"### 💡 {labels.get('company_highlights_label', '公司亮点/风险')}",
+                "",
+                f"{result.company_highlights}",
+                "",
+            ])
+
+        if result.buy_reason:
+            lines.extend([f"**💡 {reason_label}**: {result.buy_reason}", ""])
+        if result.risk_warning:
+            lines.extend([f"**⚠️ {risk_warning_label}**: {result.risk_warning}", ""])
+        if result.news_summary:
+            lines.extend([f"### 📰 {news_heading}", f"{result.news_summary}", ""])
+
         lines.append("---")
         model_used = normalize_model_used(getattr(result, "model_used", None))
         if model_used:
