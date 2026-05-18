@@ -1805,6 +1805,414 @@ class AkshareFetcher(BaseFetcher):
             logger.error(f"[Akshare] 新浪接口获取板块排行也失败: {e}")
             return None
 
+    # ── 大盘增强数据实现 ──────────────────────────────────────
+
+    def get_capital_flow(self) -> Optional[Dict[str, Any]]:
+        """
+        获取资金流向数据（北向资金 + 主力资金）
+
+        数据源：
+          - 北向资金：ak.stock_hsgt_north_net_flow_in_em（东财）
+          - 主力资金：ak.stock_individual_fund_flow_rank（个股主力资金汇总）
+        """
+        import akshare as ak
+        result = {}
+
+        # 1. 北向资金净流入
+        try:
+            self._set_random_user_agent()
+            self._enforce_rate_limit()
+            logger.info("[API调用] ak.stock_hsgt_north_net_flow_in_em() 获取北向资金...")
+            df = ak.stock_hsgt_north_net_flow_in_em(symbol="北上")
+            if df is not None and not df.empty:
+                latest = df.iloc[-1]
+                # 尝试多种可能的列名
+                for col in ['当日净流入', '净流入', 'north_amount', 'net_inflow']:
+                    if col in df.columns:
+                        val = float(latest[col]) if pd.notna(latest[col]) else 0.0
+                        result['north_net_inflow'] = round(val / 1e8, 2)  # 转为亿元
+                        break
+                logger.info(f"[Akshare] 北向资金获取成功: {result.get('north_net_inflow', 'N/A')}亿")
+        except Exception as e:
+            logger.warning(f"[Akshare] 获取北向资金失败: {e}")
+
+        # 2. 南向资金净流入（港股通）
+        try:
+            self._set_random_user_agent()
+            self._enforce_rate_limit()
+            logger.info("[API调用] ak.stock_hsgt_south_net_flow_in_em() 获取南向资金...")
+            df = ak.stock_hsgt_south_net_flow_in_em(symbol="南下")
+            if df is not None and not df.empty:
+                latest = df.iloc[-1]
+                for col in ['当日净流入', '净流入', 'south_amount', 'net_inflow']:
+                    if col in df.columns:
+                        val = float(latest[col]) if pd.notna(latest[col]) else 0.0
+                        result['southbound_net_inflow'] = round(val / 1e8, 2)  # 转为亿港元
+                        break
+                logger.info(f"[Akshare] 南向资金获取成功: {result.get('southbound_net_inflow', 'N/A')}亿")
+        except Exception as e:
+            logger.warning(f"[Akshare] 获取南向资金失败: {e}")
+
+        # 3. 主力资金净流入（全市场汇总）
+        try:
+            self._set_random_user_agent()
+            self._enforce_rate_limit()
+            logger.info("[API调用] ak.stock_individual_fund_flow_rank() 获取主力资金...")
+            df = ak.stock_individual_fund_flow_rank(indicator="今日")
+            if df is not None and not df.empty:
+                # 主力净流入列名可能不同，尝试匹配
+                flow_col = None
+                for candidate in ['主力净流入-净额', '主力净流入', 'net_inflow', 'main_net_inflow']:
+                    if candidate in df.columns:
+                        flow_col = candidate
+                        break
+                if flow_col:
+                    total = pd.to_numeric(df[flow_col], errors='coerce').sum()
+                    result['main_net_inflow'] = round(total / 1e8, 2)  # 转为亿元
+
+                    # 判断流向描述
+                    if total > 50:
+                        result['main_inflow_desc'] = "主力大幅净流入"
+                    elif total > 0:
+                        result['main_inflow_desc'] = "主力小幅净流入"
+                    elif total > -50:
+                        result['main_inflow_desc'] = "主力小幅净流出"
+                    else:
+                        result['main_inflow_desc'] = "主力大幅净流出"
+                    logger.info(f"[Akshare] 主力资金获取成功: {result.get('main_net_inflow', 'N/A')}亿")
+        except Exception as e:
+            logger.warning(f"[Akshare] 获取主力资金失败: {e}")
+
+        return result if result else None
+
+    def get_sector_capital_flow(self, n: int = 5) -> Optional[Tuple[List[Dict], List[Dict]]]:
+        """
+        获取行业板块资金流向排名
+
+        数据源：ak.stock_sector_fund_flow_rank（行业资金流向排行）
+        """
+        import akshare as ak
+
+        try:
+            self._set_random_user_agent()
+            self._enforce_rate_limit()
+            logger.info("[API调用] ak.stock_sector_fund_flow_rank() 获取板块资金流向...")
+
+            # 尝试 indicator 参数的不同取值
+            for indicator in ["今日", "3日", "5日"]:
+                try:
+                    df = ak.stock_sector_fund_flow_rank(indicator=indicator, sector_type="行业资金流")
+                    if df is not None and not df.empty:
+                        break
+                except Exception:
+                    continue
+            else:
+                return None
+
+            if df is None or df.empty:
+                return None
+
+            # 确定列名
+            name_col = None
+            flow_col = None
+            for nc in ['名称', 'sector_name', '板块名称']:
+                if nc in df.columns:
+                    name_col = nc
+                    break
+            for fc in ['主力净流入-净额', '净流入', 'main_net_inflow', 'net_inflow']:
+                if fc in df.columns:
+                    flow_col = fc
+                    break
+
+            if not name_col or not flow_col:
+                logger.warning("[Akshare] 板块资金流向列名未识别")
+                return None
+
+            df[flow_col] = pd.to_numeric(df[flow_col], errors='coerce')
+            df = df.dropna(subset=[flow_col])
+
+            top_flows = df.nlargest(n, flow_col)
+            bottom_flows = df.nsmallest(n, flow_col)
+
+            top_sectors = [
+                {
+                    'name': row[name_col],
+                    'net_inflow': round(float(row[flow_col]) / 1e8, 2),  # 亿元
+                }
+                for _, row in top_flows.iterrows()
+            ]
+            bottom_sectors = [
+                {
+                    'name': row[name_col],
+                    'net_inflow': round(float(row[flow_col]) / 1e8, 2),
+                }
+                for _, row in bottom_flows.iterrows()
+            ]
+
+            logger.info(f"[Akshare] 板块资金流向获取成功: 领涨流入{len(top_sectors)}个, 领跌流出{len(bottom_sectors)}个")
+            return top_sectors, bottom_sectors
+
+        except Exception as e:
+            logger.error(f"[Akshare] 获取板块资金流向失败: {e}")
+            return None
+
+    def get_market_breadth(self) -> Optional[Dict[str, Any]]:
+        """
+        获取市场宽度数据（涨幅分布 + 涨停池明细）
+
+        数据源：
+          - 涨幅分布：ak.stock_market_activity_legu（乐哥）
+          - 涨停池：ak.stock_zt_pool_em（东财涨停池）
+          - 昨日涨停表现：通过对比计算
+        """
+        import akshare as ak
+        from datetime import datetime, timedelta
+        result = {}
+
+        # 1. 涨幅区间分布
+        try:
+            self._set_random_user_agent()
+            self._enforce_rate_limit()
+            logger.info("[API调用] ak.stock_market_activity_legu() 获取涨幅分布...")
+            df = ak.stock_market_activity_legu(date=datetime.now().strftime('%Y%m%d'))
+            if df is not None and not df.empty:
+                distribution = {}
+                # 根据实际列名适配
+                pct_col = None
+                for c in ['涨跌幅', 'change_pct', 'pct_chg']:
+                    if c in df.columns:
+                        pct_col = c
+                        break
+                if pct_col:
+                    df[pct_col] = pd.to_numeric(df[pct_col], errors='coerce')
+                    total = len(df)
+                    distribution = {
+                        ">5%": int((df[pct_col] > 5).sum()),
+                        "3-5%": int(((df[pct_col] > 3) & (df[pct_col] <= 5)).sum()),
+                        "0-3%": int(((df[pct_col] > 0) & (df[pct_col] <= 3)).sum()),
+                        "<0%": int(((df[pct_col] <= 0) & (df[pct_col] > -3)).sum()),
+                        "<-3%": int(((df[pct_col] <= -3) & (df[pct_col] > -5)).sum()),
+                        "<-5%": int((df[pct_col] <= -5).sum()),
+                    }
+                    distribution['_total'] = total
+                    result['gain_distribution'] = distribution
+                    logger.info(f"[Akshare] 涨幅分布获取成功: 总数={total}")
+        except Exception as e:
+            logger.warning(f"[Akshare] 获取涨幅分布失败: {e}")
+
+        # 2. 涨停池明细
+        try:
+            self._set_random_user_agent()
+            self._enforce_rate_limit()
+            logger.info("[API调用] ak.stock_zt_pool_em() 获取涨停池...")
+            df = ak.stock_zt_pool_em(date=datetime.now().strftime('%Y%m%d'))
+            if df is not None and not df.empty:
+                detail = {'total': len(df)}
+
+                # 尝试识别一字板/非一字板/炸板
+                first_limit = 0
+                non_first_limit = 0
+                broken_limit = 0
+
+                # 一字板判断：通常有"一字"标记或开盘=涨停价
+                for col in ['是否一字板', '涨停类型', 'ZB']:
+                    if col in df.columns:
+                        first_limit = int((df[col].astype(str).str.contains('一字', na=False)).sum())
+                        non_first_limit = detail['total'] - first_limit
+                        break
+                else:
+                    # 无法区分时默认非一字板
+                    non_first_limit = detail['total']
+
+                detail['first_limit'] = first_limit
+                detail['non_first_limit'] = non_first_limit
+
+                # 计算炸板率（需要炸板股数据）
+                try:
+                    df_broken = ak.stock_zt_pool_zbgc_em(date=datetime.now().strftime('%Y%m%d'))
+                    if df_broken is not None and not df_broken.empty:
+                        broken_limit = len(df_broken)
+                except Exception:
+                    pass
+
+                detail['broken_limit'] = broken_limit
+                detail['broken_rate'] = round(broken_limit / max(detail['total'] + broken_limit, 1) * 100, 1)
+
+                result['limit_up_detail'] = detail
+                logger.info(f"[Akshare] 涨停池获取成功: 总计{detail['total']}家, 一字板{first_limit}, 炸板{broken_limit}({detail['broken_rate']}%)")
+        except Exception as e:
+            logger.warning(f"[Akshare] 获取涨停池失败: {e}")
+
+        # 3. 昨日涨停今日平均表现
+        try:
+            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+            self._set_random_user_agent()
+            self._enforce_rate_limit()
+            logger.info(f"[API调用] ak.stock_zt_pool_em({yesterday}) 获取昨日涨停池...")
+            yest_df = ak.stock_zt_pool_em(date=yesterday)
+            if yest_df is not None and not yest_df.empty:
+
+                # 获取昨日涨停股票代码
+                code_col = None
+                for c in ['代码', 'code', '股票代码', 'stock_code']:
+                    if c in yest_df.columns:
+                        code_col = c
+                        break
+
+                if code_col:
+                    yest_codes = set(yest_df[code_col].astype(str).tolist())
+
+                    # 获取这些股票今天的涨跌幅
+                    today = datetime.now().strftime('%Y%m%d')
+                    today_df = ak.stock_market_activity_legu(date=today)
+                    if today_df is not None and not today_df.empty:
+                        today_code_col = None
+                        for c in ['代码', 'code', '股票代码', 'stock_code']:
+                            if c in today_df.columns:
+                                today_code_col = c
+                                break
+                        today_pct_col = None
+                        for c in ['涨跌幅', 'change_pct', 'pct_chg']:
+                            if c in today_df.columns:
+                                today_pct_col = c
+                                break
+
+                        if today_code_col and today_pct_col:
+                            today_df[today_code_col] = today_df[today_code_col].astype(str)
+                            merged = today_df[today_df[today_code_col].isin(yest_codes)]
+                            if not merged.empty:
+                                avg_chg = pd.to_numeric(merged[today_pct_col], errors='coerce').mean()
+                                result['yest_limit_avg_chg'] = round(float(avg_chg), 2)
+                                logger.info(f"[Akshare] 昨日涨停今日均涨幅: {result['yest_limit_avg_chg']}%")
+        except Exception as e:
+            logger.warning(f"[Akshare] 获取昨日涨停表现失败: {e}")
+
+        return result if result else None
+
+    def get_index_daily_history(self, index_code: str, days: int = 60) -> Optional[pd.DataFrame]:
+        """
+        获取指数日线历史数据
+
+        使用 ak.index_zh_a_hist 接口获取指数日线
+        """
+        import akshare as ak
+
+        try:
+            self._set_random_user_agent()
+            self._enforce_rate_limit()
+
+            # 映射 akshare 的指数代码格式
+            code_mapping = {
+                'sh000001': '000001',
+                'sz399001': '399001',
+                'sz399006': '399006',
+                'sh000688': '000688',
+                'sh000016': '000016',
+                'sh000300': '000300',
+            }
+            ak_code = code_mapping.get(index_code, index_code.lstrip('sh').lstrip('sz'))
+
+            # 判断市场选择 symbol
+            symbol = "sh" if index_code.startswith('sh') else ("sz" if index_code.startswith('sz') else "sh")
+
+            logger.info(f"[API调用] ak.index_zh_a_hist(symbol={symbol}, code={ak_code}) 获取指数日线...")
+            df = ak.index_zh_a_hist(
+                symbol=symbol,
+                period="daily",
+                start_date=(datetime.now() - timedelta(days=days * 2)).strftime('%Y%m%d'),
+                end_date=datetime.now().strftime('%Y%m%d'),
+            )
+            if df is not None and not df.empty:
+                # 标准化列名
+                rename_map = {
+                    '日期': 'date', '开盘': 'open', '收盘': 'close',
+                    '最高': 'high', '最低': 'low', '成交量': 'volume',
+                    '成交额': 'amount', '振幅': 'amplitude', '涨跌幅': 'pct_chg',
+                    '涨跌额': 'change', '换手率': 'turnover',
+                }
+                df = df.rename(columns=lambda x: rename_map.get(x, x))
+                logger.info(f"[Akshare] 指数 {index_code} 日线获取成功: {len(df)} 条")
+                return df
+
+        except Exception as e:
+            logger.warning(f"[Akshare] 获取指数 {index_code} 日线失败: {e}")
+
+        return None
+
+    def get_sector_constituents(self, sector_name: str) -> Optional[pd.DataFrame]:
+        """
+        获取板块成分股列表（含涨跌幅、成交额、换手率等）
+
+        数据源：ak.stock_board_industry_cons_em（东财行业板块成分）
+        """
+        import akshare as ak
+
+        try:
+            self._set_random_user_agent()
+            self._enforce_rate_limit()
+
+            logger.info(f"[API调用] ak.stock_board_industry_cons_em(symbol={sector_name}) 获取板块成分股...")
+            df = ak.stock_board_industry_cons_em(symbol=sector_name)
+            if df is not None and not df.empty:
+                # 标准化列名
+                rename_map = {
+                    '代码': 'code', '名称': 'name', '涨跌幅': 'change_pct',
+                    '换手率': 'turnover_rate', '成交额': 'amount',
+                    '最新价': 'price', '市值': 'market_cap',
+                    '市盈率-动态': 'pe_dynamic',
+                }
+                df = df.rename(columns=lambda x: rename_map.get(x, x))
+                logger.info(f"[Akshare] 板块 {sector_name} 成分股获取成功: {len(df)} 只")
+                return df
+
+        except Exception as e:
+            logger.warning(f"[Akshare] 获取板块 {sector_name} 成分股失败: {e}")
+
+        return None
+
+    def get_limit_up_pool_stocks(self, date_str=None) -> List[Dict[str, Any]]:
+        """
+        获取涨停池个股详情（含代码、名称、涨跌幅、涨停原因等）
+
+        数据源：ak.stock_zt_pool_em（东财涨停池）
+        """
+        import akshare as ak
+        from datetime import datetime
+
+        try:
+            if date_str is None:
+                date_str = datetime.now().strftime('%Y%m%d')
+
+            self._set_random_user_agent()
+            self._enforce_rate_limit()
+
+            logger.info(f"[API调用] ak.stock_zt_pool_em(date={date_str}) 获取涨停池...")
+            df = ak.stock_zt_pool_em(date=date_str)
+            if df is not None and not df.empty:
+                results = []
+                # 标准化列名映射
+                code_col = next((c for c in ['代码', 'code', '股票代码'] if c in df.columns), None)
+                name_col = next((c for c in ['名称', 'name', '股票名称'] if c in df.columns), None)
+                chg_col = next((c for c in ['涨跌幅', 'change_pct'] if c in df.columns), None)
+                reason_col = next((c for c in ['涨停原因', 'reason', '原因'] if c in df.columns), None)
+
+                for _, row in df.iterrows():
+                    item = {
+                        'code': str(row[code_col]) if code_col else '',
+                        'name': str(row[name_col]) if name_col else '',
+                        'change_pct': float(row[chg_col]) if chg_col and pd.notna(row[chg_col]) else 0.0,
+                        'reason': str(row[reason_col]) if reason_col and pd.notna(row[reason_col]) else '',
+                    }
+                    results.append(item)
+
+                logger.info(f"[Akshare] 涨停池获取成功: {len(results)} 只")
+                return results
+
+        except Exception as e:
+            logger.warning(f"[Akshare] 获取涨停池个股失败: {e}")
+
+        return []
+
 
 if __name__ == "__main__":
     # 测试代码
