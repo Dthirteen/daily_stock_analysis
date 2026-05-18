@@ -1915,6 +1915,11 @@ class GeminiAnalyzer:
 | **乖离率(MA5)** | **{trend.get('bias_ma5', 0):+.2f}%** | {bias_warning} |
 | 乖离率(MA10) | {trend.get('bias_ma10', 0):+.2f}% | |
 | 量能状态 | {trend.get('volume_status', unknown_text)} | {trend.get('volume_trend', '')} |
+| MACD | {trend.get('macd_status', unknown_text)} | {trend.get('macd_signal', '')} |
+| RSI(12) | {trend.get('rsi_12', 0):.1f} | {trend.get('rsi_status', unknown_text)} - {trend.get('rsi_signal', '')} |
+| KDJ | K:{trend.get('kdj_k', 0):.1f} D:{trend.get('kdj_d', 0):.1f} J:{trend.get('kdj_j', 0):.1f} | {trend.get('kdj_status', unknown_text)} - {trend.get('kdj_signal', '')} |
+| 布林带 | 带宽:{trend.get('boll_width', 0):.1f}% | {trend.get('boll_status', unknown_text)} - {trend.get('boll_signal', '')} |
+| OBV能量潮 | {trend.get('obv_trend', 0):+.1f}% | {trend.get('obv_status', unknown_text)} - {trend.get('obv_signal', '')} |
 | 系统信号 | {trend.get('buy_signal', unknown_text)} | |
 | 系统评分 | {trend.get('signal_score', 0)}/100 | |
 
@@ -1947,6 +1952,11 @@ class GeminiAnalyzer:
 | **价格位置(MA5)** | **{trend.get('bias_ma5', 0):+.2f}%** | {bias_warning} |
 | 价格位置(MA10) | {trend.get('bias_ma10', 0):+.2f}% | |
 | 量能状态 | {trend.get('volume_status', unknown_text)} | {trend.get('volume_trend', '')} |
+| MACD | {trend.get('macd_status', unknown_text)} | {trend.get('macd_signal', '')} |
+| RSI(12) | {trend.get('rsi_12', 0):.1f} | {trend.get('rsi_status', unknown_text)} - {trend.get('rsi_signal', '')} |
+| KDJ | K:{trend.get('kdj_k', 0):.1f} D:{trend.get('kdj_d', 0):.1f} J:{trend.get('kdj_j', 0):.1f} | {trend.get('kdj_status', unknown_text)} - {trend.get('kdj_signal', '')} |
+| 布林带 | 带宽:{trend.get('boll_width', 0):.1f}% | {trend.get('boll_status', unknown_text)} - {trend.get('boll_signal', '')} |
+| OBV能量潮 | {trend.get('obv_trend', 0):+.1f}% | {trend.get('obv_status', unknown_text)} - {trend.get('obv_signal', '')} |
 | 系统信号 | {trend.get('buy_signal', unknown_text)} | |
 | 系统评分 | {trend.get('signal_score', 0)}/100 | |
 
